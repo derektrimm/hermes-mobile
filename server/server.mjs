@@ -7,7 +7,7 @@
 // adds it to every proxied request. Only allow-listed devices of the tailnet owner get in, and only
 // the API routes the app uses are proxied.
 
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createReadStream, existsSync } from 'node:fs'
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
@@ -773,6 +773,142 @@ async function sharedLive() {
 // terminal does (SIGHUP, which saves the conversation and releases its lease), then restart the same
 // tmux pane as hermes-hands, a TUI client of the shared backend that keeps the PC's desktop hands.
 // The PC window stays open and shows the same chat; the phone then joins it.
+// ---------------------------------------------------------------- typing into a PC window
+
+// A shared PC window is Hermes's TUI. Hermes tells other clients nothing about a prompt sent over the
+// socket, so a message sent that way never shows in the window as typed. Typing it into the window
+// itself makes it the window's own prompt: shown there, run there, and seen by the phone as a turn
+// typed on the PC. The TUI records the chat it shows in the file HERMES_TUI_ACTIVE_SESSION_FILE
+// names (ui-tui useSessionLifecycle.ts), which survives /resume and /new inside the window.
+
+async function childrenOf(pid) {
+  const { stdout } = await run('ps', ['-o', 'pid=', '--ppid', String(pid)]).catch(() => ({ stdout: '' }))
+
+  return stdout.split(/\s+/).filter(Boolean).map(Number)
+}
+
+/** The tmux socket of the shared window currently showing this stored chat, or null. */
+async function windowShowing(sessionId) {
+  const dir = `/tmp/tmux-${process.getuid()}`
+  const sockets = (await readdir(dir).catch(() => [])).filter(name => name.startsWith('hermes-'))
+
+  for (const socket of sockets) {
+    const pane = Number((await run('tmux', ['-L', socket, 'list-panes', '-a', '-F', '#{pane_pid}']).catch(() => ({ stdout: '' }))).stdout.trim())
+
+    if (!pane) {
+      continue
+    }
+
+    // The pane runs hermes, which runs the TUI (node): two levels down at most.
+    const procs = [pane, ...(await childrenOf(pane))]
+    procs.push(...(await Promise.all(procs.slice(1).map(childrenOf))).flat())
+
+    for (const pid of procs) {
+      const environ = await readFile(`/proc/${pid}/environ`, 'utf8').catch(() => '')
+      const vars = Object.fromEntries(environ.split('\0').filter(Boolean).map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]))
+
+      if (!vars.HERMES_TUI_ACTIVE_SESSION_FILE || !vars.HERMES_TUI_GATEWAY_URL) {
+        continue
+      }
+
+      const active = await readFile(vars.HERMES_TUI_ACTIVE_SESSION_FILE, 'utf8').then(JSON.parse).catch(() => null)
+
+      if (active?.session_id === sessionId) {
+        return socket
+      }
+    }
+  }
+
+  return null
+}
+
+const typing = new Map()
+
+// What an empty TUI input line shows (ui-tui i18n/en/chrome.ts, composer.placeholders and
+// interruptHint). Anything else on that line is text someone typed.
+const TUI_BUSY_HINT = 'Ctrl+C to interrupt…'
+const TUI_PLACEHOLDERS = new Set([
+  'Ask me anything…',
+  'Try "explain this codebase"',
+  'Try "write a test for…"',
+  'Try "refactor the auth module"',
+  'Try "/help" for commands',
+  'Try "fix the lint errors"',
+  'Try "how does the config loader work?"',
+  TUI_BUSY_HINT
+])
+
+/**
+ * Type a message into the shared PC window showing this chat and press Enter, only when that is
+ * certainly safe: the window shows its prompt with an empty input line as its last line (no draft of
+ * Derek's to mix into, no approval or menu on top that keys would answer) and is not scrolled back.
+ * While a turn runs it types "/queue <text>": the window then holds it until the turn ends, where a
+ * plain line would follow the profile's busy mode (interrupt). Anything else answers with a reason
+ * and the phone sends the usual way.
+ */
+async function typeIntoWindow(sessionId, text, running) {
+  const socket = await windowShowing(sessionId)
+
+  if (!socket) {
+    return { typed: false, reason: 'no-window' }
+  }
+
+  const tmux = (...args) => run('tmux', ['-L', socket, ...args], { timeout: 10_000 })
+  const state = async () => {
+    const mode = (await tmux('display', '-p', '-t', 'hermes', '#{pane_in_mode}')).stdout.trim()
+    const lines = (await tmux('capture-pane', '-p', '-t', 'hermes')).stdout.split('\n').filter(l => l.trim())
+    const input = (lines[lines.length - 1] ?? '').match(/^\s*\S+ ❯ ?(.*)$/)
+    const status = lines[lines.length - 2] ?? ''
+    const rest = input ? input[1].trim() : null
+
+    return {
+      scrolled: mode !== '0',
+      // The last line is the prompt, holding nothing or only one of the TUI's placeholders.
+      empty: rest !== null && (rest === '' || TUI_PLACEHOLDERS.has(rest)),
+      busy: !/[─-]\s*ready\s*│/.test(status) || rest === TUI_BUSY_HINT
+    }
+  }
+
+  const before = await state()
+
+  if (before.scrolled) {
+    return { typed: false, reason: 'scrolled' }
+  }
+
+  if (!before.empty) {
+    return { typed: false, reason: 'not-at-prompt' }
+  }
+
+  const queued = running || before.busy
+  const line = queued ? `/queue ${text}` : text
+  const buffer = `hm-type-${process.pid}`
+
+  // A bracketed paste keeps line breaks in the message instead of sending at the first one.
+  await new Promise((resolve, reject) => {
+    const child = spawn('tmux', ['-L', socket, 'load-buffer', '-b', buffer, '-'], { stdio: ['pipe', 'ignore', 'pipe'] })
+    child.on('error', reject)
+    child.on('close', code => (code === 0 ? resolve() : reject(new Error(`load-buffer exited ${code}`))))
+    child.stdin.end(line)
+  })
+  await tmux('paste-buffer', '-p', '-d', '-b', buffer, '-t', 'hermes')
+  await new Promise(resolve => setTimeout(resolve, 150))
+  await tmux('send-keys', '-t', 'hermes', 'Enter')
+
+  for (let i = 0; i < 20; i++) {
+    await new Promise(resolve => setTimeout(resolve, 150))
+
+    if ((await state()).empty) {
+      log(`type: ${queued ? 'queued' : 'sent'} a phone message in ${socket} for ${sessionId}`)
+
+      return { typed: true, queued }
+    }
+  }
+
+  log(`type: the message stayed in ${socket}'s input line`)
+
+  return { typed: true, queued, stuck: true }
+}
+
 const sharesInFlight = new Map()
 
 async function share(sessionId, profile) {
@@ -1061,6 +1197,36 @@ const server = http.createServer(async (req, res) => {
         backends: ['main', ...(await joinableBackends()).keys()],
         phone_chats: await readPhoneChats()
       })
+
+      return
+    }
+
+    if (url.pathname === '/hm/type' && req.method === 'POST') {
+      if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+        json(res, 415, { ok: false, error: 'JSON required' })
+
+        return
+      }
+
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+
+      if (typeof body.session_id !== 'string' || !/^[\w.:-]{1,128}$/.test(body.session_id) || typeof body.text !== 'string' || !body.text.trim()) {
+        json(res, 400, { ok: false, error: 'session_id and text required' })
+
+        return
+      }
+
+      // One message at a time per window, in the order they arrive.
+      const previous = typing.get(body.session_id) ?? Promise.resolve()
+      const next = previous.catch(() => undefined).then(() => typeIntoWindow(body.session_id, body.text, Boolean(body.running)))
+      typing.set(body.session_id, next)
+      const result = await next.catch(error => ({ typed: false, reason: 'error', error: String(error) }))
+
+      if (typing.get(body.session_id) === next) {
+        typing.delete(body.session_id)
+      }
+
+      json(res, 200, { ok: true, ...result })
 
       return
     }

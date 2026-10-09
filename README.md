@@ -42,8 +42,13 @@ Home Screen).
   profile, pids checked on the PC) and no background work on its threads (`/bg`, `/btw`, sign-in,
   async subagents, job pollers). Otherwise the phone keeps the text and says why. There is no
   button: phone and PC are simply both inputs.
+- A text message sent from the phone in a chat shared with a PC window is typed into that window
+  (`/hm/type`): it shows there as a normal prompt and runs as the window's own. While a turn runs it
+  is typed as `/queue ...`, so it waits instead of interrupting. It is only typed when the window's
+  input line is empty (no half-typed text, no approval or menu open) and the window is not scrolled
+  back; otherwise, and for photos and `/` commands, it goes over the socket as before.
 - Turns typed on the PC show their prompt on the phone (read from the live session). Every phone
-  message is sent as "run after", so it can never interrupt a turn the PC just started.
+  message sent over the socket is "run after", so it can never interrupt a turn the PC just started.
 - Approvals, clarify questions and sudo/secret prompts appear as cards. A question from a chat that
   is not on screen shows as a banner that jumps to it.
 - Model and reasoning effort per chat (never rewrite the profile default), rename, delete. Effort

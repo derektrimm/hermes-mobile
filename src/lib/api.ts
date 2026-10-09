@@ -130,6 +130,13 @@ export const api = {
 
   live: () => call<{ sessions: LiveSession[]; backends: string[]; phone_chats?: string[] }>('/hm/live'),
 
+  /** Type a message into the shared PC window showing this chat (see server typeIntoWindow). */
+  typeInWindow: (sessionId: string, text: string, running: boolean) =>
+    call<{ ok: boolean; typed: boolean; queued?: boolean; stuck?: boolean; reason?: string }>('/hm/type', {
+      method: 'POST',
+      body: JSON.stringify({ session_id: sessionId, text, running })
+    }),
+
   phoneChat: (sessionId: string) =>
     call<{ ok: boolean }>('/hm/phone-chat', {
       method: 'POST',

@@ -1087,6 +1087,31 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
   const queuing = visible && getState().chat.running
   const localKey = localId(queuing ? 'q' : 'u')
 
+  // In a chat shared with a PC window, a text message is typed into that window, so it shows there
+  // as typed and runs as the window's own prompt; the phone then sees that turn like any turn typed
+  // on the PC. When typing is not safe the server says so and the message goes the usual way.
+  if (visible && target.storedId && getState().chat.shared?.holder === 'pc-shared' && !attachments.length) {
+    const typed = await api.typeInWindow(target.storedId, trimmed, queuing).catch(() => null)
+
+    if (typed?.typed && onScreen(target)) {
+      if (typed.queued) {
+        setChat(c => ({ queued: [...c.queued, { id: localKey, text: trimmed }] }))
+      } else {
+        setChat(c => ({
+          items: [...c.items, { kind: 'user', id: localKey, text: trimmed }],
+          running: true,
+          status: 'Thinking…'
+        }))
+      }
+
+      if (typed.stuck) {
+        toast('Your message is in the PC window but did not send. Press Enter there.', 'error')
+      }
+
+      return true
+    }
+  }
+
   // A follow-up sent mid-turn waits beside the transcript until Hermes starts it, so the answer
   // still streaming stays one piece.
   if (!visible) {
