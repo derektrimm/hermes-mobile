@@ -1,0 +1,128 @@
+#!/bin/bash
+# Runs a desktop-launched Hermes chat as a client of a shared backend, so the phone can drive the
+# very same live session (Hermes Mobile joins it with session.activate, like a desktop-app chat).
+#
+# The desktop wrapper (the PC's ~/.local/bin/hermes) runs this inside hermes-session when the PC's
+# "desktop hands" are reachable: HERMES_MANAGED_DIR, HERMES_DESKTOP_SSH_HOST and HERMES_DESKTOP_CWD
+# are set. One backend per profile and PC (hermes-hands@<profile>--<host>.service) carries that
+# environment, so its tools run on the PC exactly as the classic per-window CLI did. The window is
+# Hermes's TUI attached to it (HERMES_TUI_GATEWAY_URL).
+#
+# Anything that is not an interactive chat (subcommands, -z one-shots, --cli, --help, --version)
+# runs plain hermes unchanged.
+set -euo pipefail
+
+hermes=$HOME/.local/bin/hermes
+profile=default
+interactive=1
+resuming=0
+model='' provider='' reasoning=''
+unshared='' # a flag the shared backend cannot apply to one window's chat
+args=("$@")
+
+for ((i = 0; i < ${#args[@]}; i++)); do
+  arg=${args[i]}
+  value=${args[i + 1]:-}
+  case $arg in
+    -p | --profile) profile=${value:-default}; i=$((i + 1)) ;;
+    --profile=*) profile=${arg#*=} ;;
+    -r | --resume) resuming=1; i=$((i + 1)) ;;
+    --resume=*) resuming=1 ;;
+    -c | --continue)
+      resuming=1
+      [[ -n $value && $value != -* ]] && i=$((i + 1))
+      ;;
+    --continue=*) resuming=1 ;;
+    # Per chat, carried into session.create below.
+    -m | --model) model=$value; i=$((i + 1)) ;;
+    --model=*) model=${arg#*=} ;;
+    --provider) provider=$value; i=$((i + 1)) ;;
+    --provider=*) provider=${arg#*=} ;;
+    --reasoning) reasoning=$value; i=$((i + 1)) ;;
+    --reasoning=*) reasoning=${arg#*=} ;;
+    # Process-wide in Hermes (toolsets, preloaded skills, approvals, limits): a shared backend
+    # serves several windows, so these run as a standalone window that honours them.
+    -t | --toolsets | -s | --skills | --in | --usage-file | --max-turns) unshared=$arg; i=$((i + 1)) ;;
+    --toolsets=* | --skills=* | --in=* | --usage-file=* | --max-turns=*) unshared=${arg%%=*} ;;
+    --yolo | --checkpoints | --worktree | -w) unshared=$arg ;;
+    -z | --cli | -h | --help | --version | -V) interactive=0 ;;
+    -*) ;;
+    *) interactive=0 ;; # a subcommand
+  esac
+done
+
+# Model or effort flags on a resumed chat would be lost (a resume keeps the chat's own settings):
+# honour them in a standalone window instead.
+if ((resuming)) && [[ -n $model$provider$reasoning ]]; then
+  unshared=${unshared:-model or effort flag on a resumed chat}
+fi
+
+if ((!interactive)) || [[ -z ${HERMES_MANAGED_DIR:-} || -z ${HERMES_DESKTOP_SSH_HOST:-} ]]; then
+  exec "$hermes" "$@"
+fi
+
+if [[ -n $unshared ]]; then
+  echo "hermes-hands: $unshared applies to this window only, so it opens as a standalone window (the phone shows it live; replies to it go here)." >&2
+  exec "$hermes" "$@"
+fi
+
+[[ $profile =~ ^[A-Za-z0-9_-]+$ ]] || { echo "hermes-hands: bad profile name: $profile" >&2; exit 2; }
+host=${HERMES_DESKTOP_SSH_HOST%%.*}
+instance=$profile--$host
+conf=$HOME/.config/hermes/hands
+envfile=$conf/$instance.env
+mkdir -p "$conf"
+chmod 700 "$conf"
+
+# A port and a token for this backend, made once and kept (0600). Two windows opening together
+# for a new profile must not both make one.
+exec 9>"$conf/.lock"
+flock 9
+if [[ ! -s $envfile ]]; then
+  used=$(sed -n 's/^HM_HANDS_PORT=//p' "$conf"/*.env 2>/dev/null || true)
+  port=27630
+  while grep -qx "$port" <<<"$used" || ss -ltnH "sport = :$port" | grep -q .; do
+    port=$((port + 1))
+    ((port <= 27699)) || { echo "hermes-hands: no free port in 27630-27699" >&2; exit 1; }
+  done
+  umask 077
+  {
+    echo "HM_HANDS_PROFILE=$profile"
+    echo "HM_HANDS_PORT=$port"
+    echo "HERMES_DESKTOP_SSH_HOST=$HERMES_DESKTOP_SSH_HOST"
+    echo "HERMES_DASHBOARD_SESSION_TOKEN=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')"
+  } >"$envfile"
+fi
+
+flock -u 9
+port=$(sed -n 's/^HM_HANDS_PORT=//p' "$envfile")
+token=$(sed -n 's/^HERMES_DASHBOARD_SESSION_TOKEN=//p' "$envfile")
+
+systemctl --user start "hermes-hands@$instance.service"
+
+for _ in $(seq 1 60); do
+  curl -fsS -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+  sleep 0.5
+done
+
+curl -fsS -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null || {
+  echo "hermes-hands: the backend for $profile on $host did not start; running a standalone window instead." >&2
+  echo "  journalctl --user -u hermes-hands@$instance" >&2
+  exec "$hermes" "$@"
+}
+
+export HERMES_TUI_GATEWAY_URL="ws://127.0.0.1:$port/api/ws?token=$token"
+
+# A new chat is created here, working in the PC directory this window was opened from; the TUI
+# itself cannot carry that directory on an ssh terminal. A resumed chat keeps its own directory.
+if ((!resuming)); then
+  # The token goes through the environment, which only this account can read; never argv.
+  if new_id=$(HM_HANDS_TOKEN=$token HM_MODEL=$model HM_PROVIDER=$provider HM_REASONING=$reasoning \
+    /usr/bin/node "$HOME/.local/bin/hermes-hands-new" "$port" "$profile" "${HERMES_DESKTOP_CWD:-$HOME}"); then
+    exec "$hermes" "$@" --tui --resume "$new_id"
+  fi
+
+  echo "hermes-hands: could not start the chat in ${HERMES_DESKTOP_CWD:-~}; it starts in your home directory." >&2
+fi
+
+exec "$hermes" "$@" --tui

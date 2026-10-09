@@ -1,0 +1,32 @@
+{
+  "name": "hermes-mobile",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Phone client for Hermes Agent, served from your own server over your tailnet.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --noEmit",
+    "test": "node --test test/*.test.ts",
+    "test:e2e": "node test/e2e/asks.mjs && node test/e2e/reducer.mjs && node test/e2e/reconnect.mjs && node test/e2e/codrive.mjs",
+    "sync:hermes": "scripts/sync-hermes-shared.sh"
+  },
+  "dependencies": {
+    "dompurify": "3.4.16",
+    "highlight.js": "11.12.0",
+    "marked": "18.0.13",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.1",
+    "@vitejs/plugin-react": "6.1.1",
+    "typescript": "7.0.2",
+    "vite": "8.3.0"
+  }
+}

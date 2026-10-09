@@ -1,0 +1,21 @@
+[Unit]
+Description=Hermes Mobile: phone app for Hermes, tailnet only (tailscale serve :8620 -> unix socket)
+Documentation=file://@APP_DIR@/README.md
+After=network-online.target hermes-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@APP_DIR@
+ExecStart=/usr/bin/node server/server.mjs
+Environment=HM_SOCKET=%t/hermes-mobile/app.sock
+Environment=HM_BACKEND=http://127.0.0.1:9119
+Environment=PATH=/usr/local/bin:/usr/bin
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+MemoryMax=256M
+Nice=5
+
+[Install]
+WantedBy=default.target

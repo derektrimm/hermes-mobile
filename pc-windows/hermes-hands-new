@@ -1,0 +1,67 @@
+#!/usr/bin/env node
+// Usage: HM_HANDS_TOKEN=<token> hermes-hands-new <port> <profile> <pc-directory>
+// Creates a new chat in a hermes-hands backend that works in the PC directory the window was opened
+// from, and prints its stored id; hermes-hands then opens the TUI on it with --resume. The window's
+// -m/--provider/--reasoning flags arrive as HM_MODEL, HM_PROVIDER and HM_REASONING and are set on
+// this chat only. The token comes through the environment so it never shows in a process list.
+const [port, profile, cwd] = process.argv.slice(2)
+const token = process.env.HM_HANDS_TOKEN
+const model = process.env.HM_MODEL || ''
+const provider = process.env.HM_PROVIDER || ''
+const reasoning = process.env.HM_REASONING || ''
+
+if (!port || !token || !profile || !cwd) {
+  console.error('usage: HM_HANDS_TOKEN=<token> hermes-hands-new <port> <profile> <pc-directory>')
+  process.exit(2)
+}
+
+const ws = new WebSocket(`ws://127.0.0.1:${port}/api/ws?token=${encodeURIComponent(token)}`)
+let next = 0
+const pending = new Map()
+
+const call = (method, params) =>
+  new Promise((resolve, reject) => {
+    const id = ++next
+    pending.set(id, { resolve, reject })
+    ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+  })
+
+ws.onmessage = message => {
+  const frame = JSON.parse(message.data)
+  const waiter = frame.id != null ? pending.get(frame.id) : undefined
+
+  if (waiter) {
+    pending.delete(frame.id)
+    frame.error ? waiter.reject(new Error(frame.error.message || 'rpc failed')) : waiter.resolve(frame.result)
+  }
+}
+
+ws.onerror = () => {
+  console.error('hermes-hands-new: cannot reach the backend')
+  process.exit(1)
+}
+
+ws.onopen = async () => {
+  try {
+    const created = await call('session.create', {
+      profile,
+      cwd,
+      cwd_explicit: true,
+      close_on_disconnect: false,
+      ...(model ? { model } : {}),
+      ...(provider ? { provider } : {}),
+      ...(reasoning ? { reasoning_effort: reasoning } : {})
+    })
+    process.stdout.write(`${created.stored_session_id}\n`)
+    ws.close()
+    process.exit(0)
+  } catch (error) {
+    console.error(`hermes-hands-new: ${error.message}`)
+    process.exit(1)
+  }
+}
+
+setTimeout(() => {
+  console.error('hermes-hands-new: timed out')
+  process.exit(1)
+}, 15000)

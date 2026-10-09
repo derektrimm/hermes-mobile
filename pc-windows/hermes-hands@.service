@@ -1,0 +1,20 @@
+[Unit]
+Description=Hermes backend for PC windows (%i): tools run on the PC, shared with Hermes Mobile
+Documentation=file://%h/.local/bin/hermes-hands
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/hermes/hands/%i.env
+Environment=HERMES_MANAGED_DIR=%h/.config/hermes/desktop-hands
+Environment=HERMES_DESKTOP_CWD=%h
+Environment=TERMINAL_SSH_SYNC_FILES=0
+Environment=PATH=%h/.config/hermes/desktop-hands/bin:%h/.hermes/tools/node-26.7.0-linux-x64/bin:%h/.local/bin:/usr/local/bin:/usr/bin
+ExecStart=%h/.local/bin/hermes -p ${HM_HANDS_PROFILE} serve --isolated --host 127.0.0.1 --port ${HM_HANDS_PORT}
+Restart=on-failure
+RestartSec=3
+Nice=5
+
+[Install]
+WantedBy=default.target
