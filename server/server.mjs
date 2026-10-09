@@ -862,13 +862,57 @@ async function share(sessionId, profile) {
     await tmux('set-hook', '-gu', 'pane-died')
     process.kill(live.pid, 'SIGHUP')
 
+    // The classic CLI saves the chat and prints its "Resume this session with:" summary on SIGHUP,
+    // but can then hang on teardown (seen: its ssh link to the PC kept the main thread in poll for
+    // minutes), leaving a dead window. Once that summary is on screen the chat is saved and the
+    // process has nothing left to do: give it a moment, then end it (TERM, then KILL). Without the
+    // summary nothing is forced; after a minute the restart is abandoned and the window left as is.
     const deadline = Date.now() + 60_000
+    // Still running: the same process (start time) and not a zombie waiting for tmux to reap it.
+    const alive = async () => {
+      const stat = await readFile(`/proc/${live.pid}/stat`, 'utf8').catch(() => '')
+      const state = stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3)
 
-    while (Date.now() < deadline && (await processStartTime(live.pid)) === started) {
+      return Boolean(stat) && state !== 'Z' && (await processStartTime(live.pid)) === started
+    }
+    // It may exit on its own between the check and the signal.
+    const signal = name => {
+      try {
+        process.kill(live.pid, name)
+      } catch {
+        // already gone
+      }
+    }
+    let savedAt = 0
+
+    while (Date.now() < deadline && (await alive())) {
       await new Promise(resolve => setTimeout(resolve, 300))
+
+      if (!savedAt && /Resume this session with:/.test((await tmux('capture-pane', '-p', '-t', 'hermes').catch(() => ({ stdout: '' }))).stdout)) {
+        savedAt = Date.now()
+      }
+
+      if (savedAt && Date.now() - savedAt > 3_000 && (await alive())) {
+        log(`share: ${live.pid} saved its chat but did not exit; ending it`)
+        signal('SIGTERM')
+
+        for (let i = 0; i < 20 && (await alive()); i++) {
+          await new Promise(resolve => setTimeout(resolve, 250))
+        }
+
+        if (await alive()) {
+          signal('SIGKILL')
+
+          for (let i = 0; i < 20 && (await alive()); i++) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+        }
+
+        break
+      }
     }
 
-    if ((await processStartTime(live.pid)) === started) {
+    if (await alive()) {
       return { status: 504, body: { ok: false, error: 'The PC window did not let go within a minute.' } }
     }
 
