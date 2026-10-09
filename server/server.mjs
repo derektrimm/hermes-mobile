@@ -847,6 +847,13 @@ const TUI_PLACEHOLDERS = new Set([
  * and the phone sends the usual way.
  */
 async function typeIntoWindow(sessionId, text, running) {
+  // The TUI runs a line starting with "!" as a shell command, and splices the output of "{!cmd}"
+  // into the prompt (ui-tui useSubmission.ts, protocol/interpolation.ts). Typed from the phone those
+  // would run commands where a message was meant: such text goes over the socket instead.
+  if (/^\s*!/.test(text) || /\{!.+?\}/s.test(text)) {
+    return { typed: false, reason: 'shell-syntax' }
+  }
+
   const socket = await windowShowing(sessionId)
 
   if (!socket) {
