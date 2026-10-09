@@ -948,12 +948,53 @@ export async function setEffort(effort: string): Promise<boolean> {
 }
 
 /** The runtime the target chat is driven through, creating or joining it as needed. */
+/**
+ * Where a stored chat with no runtime here is live right now, checked at the moment it is needed:
+ * a chat shown as "not open anywhere" can have been opened (or re-opened) in a PC window or the
+ * desktop app since. Joinable holders are joined (the target and the screen move to that backend);
+ * 'window' means an older PC window holds it, which only a message sent from here may convert.
+ */
+async function routeStored(target: Target): Promise<'here' | 'joined' | 'window'> {
+  if (!target.storedId || target.liveId || target.backend !== MAIN) {
+    return 'here'
+  }
+
+  await refreshLive()
+  const holder = liveElsewhere(target.storedId, target.profile)
+
+  if (!holder) {
+    return 'here'
+  }
+
+  if ((holder.holder === 'pc-shared' || holder.holder === 'desktop-app') && holder.backend) {
+    target.backend = holder.backend
+
+    if (onScreen(target)) {
+      setChat({ backend: holder.backend, shared: holder, watch: null })
+    }
+
+    return 'joined'
+  }
+
+  if (onScreen(target)) {
+    setChat({ watch: holder })
+  }
+
+  return 'window'
+}
+
 async function ensureRuntime(target: Target): Promise<string> {
   if (target.liveId) {
     return target.liveId
   }
 
   if (target.storedId) {
+    // Never resume on garrison a chat that is open in a PC window or the desktop app: that makes
+    // a second live copy, the window stops seeing the chat, and commands run in the wrong place.
+    if ((await routeStored(target)) === 'window') {
+      throw new Error('This chat is open in a PC window. Send a message here to join it.')
+    }
+
     const liveId = await attach(target, { quiet: true })
 
     if (!liveId) {
@@ -1019,6 +1060,11 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
 
   const target = given ?? captureTarget()
   const visible = onScreen(target)
+
+  // A chat with no runtime here: check where it is live before anything is sent (see routeStored).
+  if (visible && target.storedId && !target.liveId && !getState().chat.watch) {
+    await routeStored(target)
+  }
 
   // Still joining a PC window: the message waits and is sent once the phone is in. Photos cannot
   // wait in that queue, so they stay in the composer until the phone has joined.

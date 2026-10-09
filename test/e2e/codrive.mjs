@@ -11,6 +11,7 @@ const errors = []
 page.on('pageerror', e => errors.push(String(e)))
 
 const calls = []
+let pcStored = ''
 const overrides = {}
 const delays = {}
 let socket
@@ -33,7 +34,34 @@ const waitFor = async (fn, what) => {
 const assistantTexts = () => page.locator('.msg.assistant').allInnerTexts()
 const userTexts = () => page.locator('.msg.user .bubble').allInnerTexts()
 
-await page.routeWebSocket(/\/api\/ws$/, ws => {
+const pcCalls = []
+
+await page.routeWebSocket(/\/api\/ws(\?|$)/, ws => {
+  const backend = new URL(ws.url()).searchParams.get('backend') || 'main'
+
+  if (backend !== 'main') {
+    // A shared PC window's backend: it has the chat live as runtime p9.
+    ws.onMessage(raw => {
+      const frame = JSON.parse(raw)
+
+      if (!frame.method) {
+        return
+      }
+
+      pcCalls.push({ method: frame.method, params: frame.params })
+      const results = {
+        'session.active_list': { sessions: [{ id: 'p9', session_key: pcStored }] },
+        'session.activate': { session_id: 'p9', session_key: pcStored, messages: [], running: false },
+        'prompt.submit': { status: 'streaming' },
+        'session.events.since': { events: [], latest_seq: 0, truncated: false, count: 0, epoch: 'p', open_requests: [] }
+      }
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id: frame.id, result: results[frame.method] ?? {} }))
+    })
+    ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'event', params: { type: 'gateway.ready', payload: { replay_epoch: 'p' } } }))
+
+    return
+  }
+
   socket = ws
   ws.onMessage(async raw => {
     const frame = JSON.parse(raw)
@@ -183,6 +211,40 @@ if (only(5)) {
   assert.equal(lastCall('prompt.submit').params.session_id, sid, 'sent to the chat that ran the command')
   assert.equal(await page.locator('.msg.user').count(), 0, 'the new chat stays empty')
   console.log('5 ok: a late skill expansion lands in its own chat')
+}
+
+// 6. A chat with no runtime here (put to sleep) that has meanwhile been opened in a shared PC
+//    window: sending joins the window's backend and goes there, never a second copy on the server.
+if (only(6)) {
+  await page.click('button[aria-label="New chat"] >> nth=0')
+  await page.fill('.composer textarea', 'start a chat')
+  await page.click('button[aria-label="Send"]')
+  await waitFor(() => lastCall('prompt.submit')?.params.text === 'start a chat', 'chat created')
+  const live6 = lastCall('prompt.submit').params.session_id
+  pcStored = `stored-${live6}`
+  event('message.start', {}, live6)
+  event('message.complete', { text: 'started', status: 'complete' }, live6)
+  await page.waitForFunction(() => !document.querySelector('.send.stop'))
+  send({ method: 'event', params: { type: 'session.reclaimed', session_id: '', payload: { session_id: live6, stored_session_id: pcStored, reason: 'idle_timeout' } } })
+  await page.waitForSelector('.notice:has-text("put this chat to sleep")')
+  await page.route('**/hm/live', route =>
+    route.fulfill({
+      json: {
+        sessions: [{ session_id: pcStored, holder: 'pc-shared', holder_label: 'a Hermes window on your PC', backend: 'pc-9', profile: null }],
+        backends: ['main', 'pc-9'],
+        phone_chats: []
+      }
+    })
+  )
+  const resumes = calls.filter(c => c.method === 'session.resume' || c.method === 'session.activate').length
+  await page.fill('.composer textarea', 'typed after the window came back')
+  await page.click('button[aria-label="Send"]')
+  await waitFor(() => pcCalls.some(c => c.method === 'prompt.submit'), 'submit on the PC backend')
+  assert.equal(pcCalls.find(c => c.method === 'prompt.submit').params.session_id, 'p9')
+  assert.equal(calls.filter(c => c.method === 'session.resume' || c.method === 'session.activate').length, resumes, 'no second copy on the server')
+  assert.ok(!calls.some(c => c.method === 'prompt.submit' && c.params.text === 'typed after the window came back'), 'not sent on the server')
+  await page.unroute('**/hm/live')
+  console.log('6 ok: a chat re-opened in a shared PC window is joined there, not copied on the server')
 }
 
 console.log('errors', JSON.stringify(errors))
