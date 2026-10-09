@@ -144,7 +144,7 @@ function writePrefs(state: State) {
 const prefs = readPrefs()
 
 // Coming back within this long (a reload, iOS evicting the app in the background) reopens the chat
-// you were in; after longer the app starts on a new chat, like ChatGPT.
+// you were in; after longer the app starts on a new chat.
 const RESTORE_WITHIN_MS = 30 * 60_000
 
 export const restoreChat =

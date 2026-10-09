@@ -1,4 +1,4 @@
-// The review fixes, proven against a stand-in gateway: the test plays the Hermes backend on the
+// The chat reducer and actions against a stand-in gateway: the test plays the Hermes backend on the
 // app's own WebSocket and checks what the app puts on the wire and on screen.
 import assert from 'node:assert/strict'
 import { BASE, chromium, devices } from './env.mjs'
@@ -88,7 +88,7 @@ const waitFor = async (fn, what) => {
 await page.goto(BASE, { waitUntil: 'networkidle' })
 await page.waitForFunction(() => !document.querySelector('.conn-banner'), null, { timeout: 15000 })
 
-// 1. A model picked before the first message is created with the chat (finding 7).
+// 1. A model picked before the first message is created with the chat.
 await page.click('.title-btn')
 await page.waitForTimeout(400)
 await page.click('.sheet.open .setting:has-text("Model")')
@@ -109,8 +109,8 @@ assert.equal(lastCall('session.create').params.reasoning_effort, 'max')
 assert.ok(!calls.some(c => c.method === 'config.set'), 'no separate switch that could fail after the send')
 console.log('1 ok: model and effort chosen before the first message ride on session.create')
 
-// 2. Interim text, a tool, then a final answer that was never streamed (finding 8), and reasoning
-//    reported before any answer exists (finding 18).
+// 2. Interim text, a tool, then a final answer that was never streamed, and reasoning
+//    reported before any answer exists.
 event('message.start')
 event('message.interim', { text: 'I will check.', already_streamed: false })
 event('tool.start', { tool_id: 't1', name: 'terminal', context: 'uptime' })
@@ -126,7 +126,7 @@ assert.ok(texts.some(t => t.includes('The final answer is 42.')), 'final answer 
 console.log('2 ok: interim and final answer both shown; reasoning kept:', await page.locator('.work').count() > 0)
 
 // 3. A follow-up queued mid-turn waits outside the transcript, the answer stays one piece, and the
-//    follow-up joins the transcript when its turn starts (finding 14).
+//    follow-up joins the transcript when its turn starts.
 event('message.start')
 event('message.delta', { text: 'Working on part one' })
 overrides['prompt.submit'] = () => ({ status: 'queued' })
@@ -146,7 +146,7 @@ event('message.complete', { text: 'Part two done.', status: 'complete' })
 delete overrides['prompt.submit']
 console.log('3 ok: queued follow-up kept aside, answer unbroken, admitted when its turn started')
 
-// 4. A stale question: answered elsewhere, the backend no longer lists it (finding 16).
+// 4. A stale question: answered elsewhere, the backend no longer lists it.
 send({ id: 'srq-9', method: 'approval', params: { session_id: 'm1', request_id: 'q9', command: 'ls', choices: ['once', 'deny'] } })
 await page.waitForSelector('.ask')
 event('tool.start', { tool_id: 't9', name: 'terminal', context: 'ls' })
@@ -160,7 +160,7 @@ send({ method: 'event', params: { type: 'approval.cancelled', session_id: '', pa
 await page.waitForSelector('.ask', { state: 'detached', timeout: 5000 })
 console.log('5 ok: broadcast approval.cancelled removes the card')
 
-// 6. session.reclaimed arrives as a broadcast; the next send re-joins (finding 11).
+// 6. session.reclaimed arrives as a broadcast; the next send re-joins.
 send({ method: 'event', params: { type: 'session.reclaimed', session_id: '', payload: { session_id: 'm1', stored_session_id: 'stored-m1', reason: 'idle_timeout' } } })
 await page.waitForSelector('.notice:has-text("put this chat to sleep")')
 const before = calls.length
@@ -172,7 +172,7 @@ assert.ok(rejoin, 'rejoined before sending')
 event('message.complete', { text: 'yes', status: 'complete' })
 console.log('6 ok: reclaimed runtime dropped and re-joined on the next send via', rejoin.method)
 
-// 7. Skill commands fall back to command.dispatch (finding 15).
+// 7. Skill commands fall back to command.dispatch.
 overrides['slash.exec'] = () => ({ error: { code: 4018, message: 'skill command: use command.dispatch for /deploy' } })
 overrides['command.dispatch'] = () => ({ type: 'send', message: 'Run the deploy skill for staging' })
 const beforeSkill = calls.length
@@ -185,7 +185,7 @@ assert.equal(lastCall('prompt.submit').params.text, 'Run the deploy skill for st
 event('message.complete', { text: 'ok', status: 'complete' })
 console.log('7 ok: skill command dispatched and its prompt sent')
 
-// 8. A photo upload that fails half way takes back the photo already staged (finding 13).
+// 8. A photo upload that fails half way takes back the photo already staged.
 let attachCount = 0
 overrides['image.attach_bytes'] = () => (++attachCount === 1 ? { attached: true, path: '/tmp/a.jpg' } : { error: { code: 5000, message: 'disk full' } })
 await page.setInputFiles('.composer input[type=file]', [new URL('blue.png', import.meta.url).pathname, new URL('blue.png', import.meta.url).pathname])
@@ -201,8 +201,7 @@ await page.locator('.attachment button').first().click()
 await page.locator('.attachment button').first().click()
 await page.fill('.composer textarea', '')
 
-// 9. A send whose chat is still being created lands in that chat, not in the chat opened meanwhile
-//    (finding 2).
+// 9. A send whose chat is still being created lands in that chat, not in the chat opened meanwhile.
 await page.click('button[aria-label="New chat"] >> nth=0')
 delays['session.create'] = 1500
 await page.fill('.composer textarea', 'instructions for chat A')
@@ -218,7 +217,7 @@ console.log('9 ok: delayed send went to its own chat; the new chat stayed empty'
 
 // 10. A message sent while the phone believes the chat is idle always goes as "run after": if the
 //     PC started a turn a moment earlier, Hermes queues it instead of interrupting that turn, and
-//     the phone shows it waiting (Grok review, finding 3).
+//     the phone shows it waiting.
 await page.fill('.composer textarea', 'first in chat B')
 await page.click('button[aria-label="Send"]')
 await waitFor(() => lastCall('prompt.submit')?.params.text === 'first in chat B', 'chat B first submit')

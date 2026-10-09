@@ -4,6 +4,16 @@ A phone app for a Hermes agent running on your own server, served only to your o
 your tailnet. Open the address you set as `HM_PUBLIC_ORIGIN` (on an iPhone: Share, then Add to
 Home Screen).
 
+## Requirements
+
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) running on a Linux server you own, with
+  its dashboard backend (`hermes dashboard`) on `127.0.0.1:9119`.
+- [Tailscale](https://tailscale.com) on the server and on your phone, with HTTPS certificates enabled
+  for the tailnet. The app is only reachable through `tailscale serve`.
+- Node.js 22 on the server and on the machine you deploy from; ssh from that machine to the server.
+- Optional, for co-driving PC terminal windows: Hermes's "desktop hands" setup, where windows opened on
+  a PC run on the server and their commands run on the PC over ssh.
+
 ## What it does
 
 - Chat with Hermes the way the desktop app does: streaming answers, tool steps grouped into one
@@ -75,10 +85,21 @@ iPhone --https, tailnet only--> tailscale serve :8620 --> unix socket (0700 dir)
 |---|---|
 | `deploy/deploy.sh` | build, copy to the server, (re)start `hermes-mobile.service`, set the tailnet listener, probe |
 | `scripts/sync-hermes-shared.sh` | refresh the vendored Hermes client after `hermes update`, then deploy |
-| `npm test` | transcript mapping tests |
+| `npm test` | unit tests (transcript mapping, names) |
 | `npm run test:e2e` | the app against a stand-in gateway on the live deployment: questions, queued follow-ups, interim and final answers, reclaimed runtimes, skill commands, photo rollback, sends racing a chat switch or a PC turn, reconnects, turns typed on the PC, Stop |
 | `node test/e2e/held-live.mjs "<chat>"`, `autoshare-live.mjs "<chat>"` | live checks against a real older PC window |
 | `journalctl --user -u hermes-mobile` (server) | server log, including refused devices and hand-offs |
 
 Phone chats run in the Hermes backend on the server, so their tools act on the server. Chats you started
 on the PC keep running there until you continue them here.
+
+## Contributing
+
+Bug reports and small, focused pull requests are welcome; every pull request needs the
+maintainer's approval before it merges. See [CONTRIBUTING.md](CONTRIBUTING.md). Report security
+problems privately, as described in [SECURITY.md](.github/SECURITY.md).
+
+## License
+
+[MIT](LICENSE). `vendor/hermes-shared` is copied from Hermes Agent and keeps its own
+[MIT license](vendor/hermes-shared/LICENSE) (Nous Research).

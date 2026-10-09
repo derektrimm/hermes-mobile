@@ -1,0 +1,62 @@
+name: Bug report
+description: Something in the app is broken or behaves wrongly.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find this one.
+          required: true
+        - label: I removed my own addresses, logins and tokens from everything below.
+          required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat and streaming
+        - Co-driving a desktop app chat or PC window
+        - Approvals and questions
+        - Models and reasoning effort
+        - Connection and reconnecting
+        - Layout on the phone (keyboard, safe areas, gestures)
+        - Server, deploy or settings
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a chat that is running in the desktop app
+        2. Send a message from the phone
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: device
+    attributes:
+      label: Phone and iOS version
+      placeholder: iPhone 15, iOS 26.1, added to the Home Screen
+  - type: input
+    id: hermes
+    attributes:
+      label: Hermes version
+      description: The Hermes Agent revision your server runs (vendor/hermes-shared/HERMES_REVISION is the one this app was built against).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Server log lines (journalctl --user -u hermes-mobile) or screenshots, with personal details removed.
