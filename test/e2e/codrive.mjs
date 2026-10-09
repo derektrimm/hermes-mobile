@@ -7,6 +7,8 @@ import { BASE, chromium, devices } from './env.mjs'
 const browser = await chromium.launch()
 const context = await browser.newContext({ ...devices['iPhone 14 Pro Max'], colorScheme: 'dark' })
 const page = await context.newPage()
+// The stand-in's chats are not real: keep them out of the server's list of phone chats.
+await page.route('**/hm/phone-chat', route => route.fulfill({ json: { ok: true } }))
 const errors = []
 page.on('pageerror', e => errors.push(String(e)))
 

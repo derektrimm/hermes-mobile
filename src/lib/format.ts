@@ -16,9 +16,11 @@ export function placeOf(chat: Chat): Place {
 
     return {
       word: pc ? 'On PC' : 'Desktop app',
-      sentence: pc
-        ? 'Live in a Hermes window on your PC. The window and this phone drive the same chat: either can send, stop or answer, and its commands run on your PC.'
-        : 'Live in the desktop app. The app and this phone drive the same chat: either can send, stop or answer.',
+      sentence: chat.shared.windowless
+        ? 'Runs on your PC: its commands run there, though no Hermes window has it open. Open it in a window with hermes --resume and the window joins this same chat.'
+        : pc
+          ? 'Live in a Hermes window on your PC. The window and this phone drive the same chat: either can send, stop or answer, and its commands run on your PC.'
+          : 'Live in the desktop app. The app and this phone drive the same chat: either can send, stop or answer.',
       busy: chat.running
     }
   }

@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-import type { LiveSession, Profile, SessionRow } from './api'
+import type { HandsInstance, LiveSession, Profile, SessionRow } from './api'
 import type { Item } from './transcript'
 import type { SessionLiveInfo, Usage } from '../../vendor/hermes-shared/gateway-contract.generated'
 
@@ -79,6 +79,8 @@ export interface State {
   backends: string[]
   /** Stored ids of chats started on the phone (kept by the server, so every device agrees). */
   phoneChats: string[]
+  /** PC-window backends set up on the server, per account. */
+  hands: HandsInstance[]
   /** Gateway runtimes this phone started, resumed or joined, by stored id. */
   runtimes: Record<string, { liveId: string; profile: string; backend?: string }>
   /** Runtimes with a turn in progress (for the drawer and background-finish toasts). */
@@ -165,6 +167,7 @@ let state: State = {
   live: [],
   backends: ['main'],
   phoneChats: [],
+  hands: [],
   runtimes: prefs.runtimes || {},
   busy: {},
   chat: emptyChat(prefs.profile || 'default'),

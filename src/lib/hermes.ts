@@ -371,8 +371,8 @@ function refreshSessionsSoon() {
 
 export async function refreshLive() {
   try {
-    const { sessions, backends, phone_chats } = await api.live()
-    setState(s => ({ live: sessions, backends, phoneChats: phone_chats ?? s.phoneChats }))
+    const { sessions, backends, phone_chats, hands } = await api.live()
+    setState(s => ({ live: sessions, backends, phoneChats: phone_chats ?? s.phoneChats, hands: hands ?? s.hands }))
   } catch (error) {
     console.warn('live', error)
   }
@@ -464,6 +464,24 @@ export async function openSession(row: { id: string; profile: string; title?: st
     // or the desktop app had its commands run on the PC; from here they run on the server, so say so.
     const source = getState().sessions.find(s => s.id === row.id && s.profile === row.profile)?.source ?? ''
     const fresh = !getState().runtimes[row.id]
+    const home = await pcHome(row.id, row.profile)
+
+    if (seq !== openSeq) {
+      return
+    }
+
+    if (home) {
+      goWindowless(row.id, row.profile, home)
+      releaseUnusedGateways()
+
+      if ((await attach(captureTarget(), { quiet: true })) || seq !== openSeq) {
+        return
+      }
+
+      // The PC backend could not take it up (the PC dropped off just then): the server takes it.
+      setChat({ backend: MAIN, shared: null, error: null })
+    }
+
     releaseUnusedGateways()
     const liveId = await attach(captureTarget())
 
@@ -488,6 +506,15 @@ async function joinRuntime(target: Target): Promise<SessionResumeResult> {
     const live = list.sessions.find(item => item.session_key === target.storedId)
 
     if (!live) {
+      // A PC-window backend can take up a chat no window has open: it runs there, on the PC.
+      if (target.backend.startsWith('pc-') && getState().hands.some(h => h.backend === target.backend)) {
+        return rpcOn<SessionResumeResult>(target.backend, 'session.resume', {
+          session_id: target.storedId,
+          profile: target.profile,
+          close_on_disconnect: false
+        })
+      }
+
       throw new Error('This chat is no longer open on the PC.')
     }
 
@@ -949,6 +976,50 @@ export async function setEffort(effort: string): Promise<boolean> {
 
 /** The runtime the target chat is driven through, creating or joining it as needed. */
 /**
+ * A chat that started on the PC (a terminal window, old or shared) and is open nowhere now continues
+ * on that account's PC-window backend, so its commands keep running on the PC, while the PC answers;
+ * a phone chat, or a PC that is off, stays on the server. Starts the backend if it is set up but not
+ * running. Returns the backend to use, or null for the server's own.
+ */
+async function pcHome(storedId: string, profile: string): Promise<string | null> {
+  const row = getState().sessions.find(r => r.id === storedId && r.profile === profile)
+  const fromPc =
+    row?.source === 'cli' || (row?.source === 'tui' && !getState().phoneChats.includes(storedId) && !(row.cwd || '').includes('/.hermes'))
+  const hands = getState().hands.find(h => h.profile === profile && h.reachable)
+
+  if (!fromPc || !hands) {
+    return null
+  }
+
+  if (hands.backend) {
+    return hands.backend
+  }
+
+  const started = await api.startHands(hands.instance).catch(() => null)
+
+  return started?.backend ?? null
+}
+
+/** Point the chat on screen at a PC-window backend it is driven on without a window open. */
+function goWindowless(storedId: string, profile: string, backend: string) {
+  setChat({
+    backend,
+    watch: null,
+    shared: {
+      session_id: storedId,
+      profile,
+      pid: 0,
+      surface: null,
+      started_at: null,
+      holder: 'pc-shared',
+      holder_label: 'your PC',
+      backend,
+      windowless: true
+    }
+  })
+}
+
+/**
  * Where a stored chat with no runtime here is live right now, checked at the moment it is needed:
  * a chat shown as "not open anywhere" can have been opened (or re-opened) in a PC window or the
  * desktop app since. Joinable holders are joined (the target and the screen move to that backend);
@@ -963,6 +1034,18 @@ async function routeStored(target: Target): Promise<'here' | 'joined' | 'window'
   const holder = liveElsewhere(target.storedId, target.profile)
 
   if (!holder) {
+    const home = await pcHome(target.storedId, target.profile)
+
+    if (home) {
+      target.backend = home
+
+      if (onScreen(target)) {
+        goWindowless(target.storedId, target.profile, home)
+      }
+
+      return 'joined'
+    }
+
     return 'here'
   }
 

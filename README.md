@@ -95,8 +95,10 @@ iPhone --https, tailnet only--> tailscale serve :8620 --> unix socket (0700 dir)
 | `node test/e2e/held-live.mjs "<chat>"`, `autoshare-live.mjs "<chat>"` | live checks against a real older PC window |
 | `journalctl --user -u hermes-mobile` (server) | server log, including refused devices and hand-offs |
 
-Phone chats run in the Hermes backend on the server, so their tools act on the server. Chats you started
-on the PC keep running there until you continue them here.
+Phone chats run in the Hermes backend on the server, so their tools act on the server. A chat started
+on the PC that no window has open continues on that account's PC-window backend (started if needed)
+while the PC answers, so its commands still run on the PC; opening it again in a window joins that same
+chat. With the PC off it continues on the server, and the chat says so.
 
 ## Contributing
 

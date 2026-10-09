@@ -153,6 +153,10 @@ export function Composer({ chat }: { chat: Chat }) {
             <span>
               {chat.held ? (
                 chat.held
+              ) : chat.shared?.windowless ? (
+                <>
+                  Runs on <strong>your PC</strong>
+                </>
               ) : chat.shared?.holder === 'pc-shared' || chat.watch?.holder === 'pc-window' ? (
                 <>
                   To the Hermes window on <strong>your PC</strong>

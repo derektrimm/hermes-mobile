@@ -169,11 +169,84 @@ async function joinableBackends() {
     if (info.cmdline.includes('--ssh-owner-nonce')) {
       out.set(`desktop-${pid}`, { url: `http://127.0.0.1:${port}`, kind: 'desktop-app' })
     } else if (info.cmdline.includes('--isolated') && (await hasHands(Number(pid)))) {
-      out.set(`pc-${pid}`, { url: `http://127.0.0.1:${port}`, kind: 'pc-shared' })
+      const profileAt = info.cmdline.indexOf('-p')
+      const env = await readFile(`/proc/${pid}/environ`, 'utf8').catch(() => '')
+      out.set(`pc-${pid}`, {
+        url: `http://127.0.0.1:${port}`,
+        kind: 'pc-shared',
+        profile: profileAt >= 0 ? info.cmdline[profileAt + 1] : 'default',
+        pcHost: env.split('\0').find(l => l.startsWith('HERMES_DESKTOP_SSH_HOST='))?.slice('HERMES_DESKTOP_SSH_HOST='.length) || ''
+      })
     }
   }
 
   return out
+}
+
+// Whether the PC a hands backend runs commands on answers right now (its tools reach it over ssh).
+const pcReach = new Map()
+
+async function pcReachable(host) {
+  const cached = pcReach.get(host)
+
+  if (cached && Date.now() - cached.at < 30_000) {
+    return cached.ok
+  }
+
+  const ok = Boolean(host) && (await run('ssh', ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3', host, 'true'], { timeout: 6_000 }).then(() => true, () => false))
+  pcReach.set(host, { at: Date.now(), ok })
+
+  return ok
+}
+
+const HANDS_CONF = path.join(HOME, '.config/hermes/hands')
+
+/**
+ * Every PC-window backend set up on this server (one per account and PC, made by pc-windows/
+ * hermes-hands the first time a window opens), whether it runs now, and whether its PC answers.
+ */
+async function handsInstances(joinable) {
+  const files = (await readdir(HANDS_CONF).catch(() => [])).filter(f => f.endsWith('.env'))
+
+  return Promise.all(
+    files.map(async file => {
+      const env = Object.fromEntries(
+        (await readFile(path.join(HANDS_CONF, file), 'utf8').catch(() => ''))
+          .split('\n')
+          .filter(l => l.includes('='))
+          .map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)])
+      )
+      const running = [...joinable].find(([, b]) => b.kind === 'pc-shared' && b.profile === env.HM_HANDS_PROFILE && b.pcHost === env.HERMES_DESKTOP_SSH_HOST)
+
+      return {
+        instance: file.slice(0, -'.env'.length),
+        profile: env.HM_HANDS_PROFILE || '',
+        backend: running ? running[0] : null,
+        reachable: await pcReachable(env.HERMES_DESKTOP_SSH_HOST || '')
+      }
+    })
+  )
+}
+
+/** Start a PC-window backend that is set up but not running, and return its key once it serves. */
+async function startHands(instance) {
+  if (!/^[A-Za-z0-9_-]+--[A-Za-z0-9-]+$/.test(instance) || !existsSync(path.join(HANDS_CONF, `${instance}.env`))) {
+    return null
+  }
+
+  await run('systemctl', ['--user', 'start', `hermes-hands@${instance}.service`], { timeout: 20_000 })
+
+  for (let i = 0; i < 60; i++) {
+    const found = (await handsInstances(await joinableBackends())).find(h => h.instance === instance && h.backend)
+
+    if (found) {
+      return found.backend
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+
+  return null
 }
 
 async function hasHands(pid) {
@@ -1196,14 +1269,32 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/hm/live' && req.method === 'GET') {
+      const joinable = await joinableBackends()
       const leases = await liveSessions()
       const seen = new Set(leases.map(l => `${l.profile}:${l.session_id}`))
       const extra = (await sharedLive()).filter(l => !seen.has(`${l.profile}:${l.session_id}`))
       json(res, 200, {
         sessions: [...leases, ...extra],
-        backends: ['main', ...(await joinableBackends()).keys()],
+        backends: ['main', ...joinable.keys()],
+        // The backends PC windows use, per account: a PC chat whose window is closed continues there,
+        // so its commands keep running on the PC, while the PC answers.
+        hands: await handsInstances(joinable),
         phone_chats: await readPhoneChats()
       })
+
+      return
+    }
+
+    if (url.pathname === '/hm/hands-start' && req.method === 'POST') {
+      if (!String(req.headers['content-type'] || '').startsWith('application/json')) {
+        json(res, 415, { ok: false, error: 'JSON required' })
+
+        return
+      }
+
+      const body = JSON.parse((await readBody(req)).toString() || '{}')
+      const backend = typeof body.instance === 'string' ? await startHands(body.instance) : null
+      json(res, backend ? 200 : 409, backend ? { ok: true, backend } : { ok: false, error: 'The PC backend did not start.' })
 
       return
     }

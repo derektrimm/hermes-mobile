@@ -57,6 +57,8 @@ export interface SessionRow {
   message_count?: number | null
   source?: string | null
   model?: string | null
+  /** The directory the chat works in (a phone chat: the account's Hermes folder on the server). */
+  cwd?: string | null
   profile: string
 }
 
@@ -83,6 +85,18 @@ export interface LiveSession {
   /** Desktop-app chats only: the live title and status (the stored list misses brand-new chats). */
   title?: string | null
   status?: string | null
+  /** Driven on a PC-window backend with no window open on it (commands still run on the PC). */
+  windowless?: boolean
+}
+
+/** A PC-window backend set up on the server for one account (see server handsInstances). */
+export interface HandsInstance {
+  instance: string
+  profile: string
+  /** Its key while it runs ('pc-<pid>'), else null. */
+  backend: string | null
+  /** Whether its PC answers right now. */
+  reachable: boolean
 }
 
 /** A raw stored message row (GET /api/sessions/{id}/messages). */
@@ -128,7 +142,10 @@ export const api = {
   remove: (profile: string, sessionId: string) =>
     call(`/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}`, { method: 'DELETE' }),
 
-  live: () => call<{ sessions: LiveSession[]; backends: string[]; phone_chats?: string[] }>('/hm/live'),
+  live: () => call<{ sessions: LiveSession[]; backends: string[]; phone_chats?: string[]; hands?: HandsInstance[] }>('/hm/live'),
+
+  startHands: (instance: string) =>
+    call<{ ok: boolean; backend?: string }>('/hm/hands-start', { method: 'POST', body: JSON.stringify({ instance }) }, 45_000),
 
   /** Type a message into the shared PC window showing this chat (see server typeIntoWindow). */
   typeInWindow: (sessionId: string, text: string, running: boolean) =>
