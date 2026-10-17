@@ -14,6 +14,8 @@ export interface UserItem {
   peer?: boolean
   /** Photos stored by reference only (no picture data in history): shown as "Photo" chips. */
   photos?: number
+  /** Names of the files attached to the prompt ("@file:" refs). */
+  files?: string[]
 }
 
 export interface AssistantItem {
@@ -55,15 +57,24 @@ export const localId = (prefix: string) => `${prefix}-${Date.now().toString(36)}
 // pictures, not words: lift them out of the bubble text.
 const IMAGE_REF_LINE = /^@image:[^\n]*\n?/gm
 const SCREENSHOT_LINE = /^\[screenshot\]\n?/gm
+// Attached files the same way, as "@file:<path>" lines (the path quoted when it has spaces).
+const FILE_REF_LINE = /^@file:(?:"([^"\n]+)"|`([^`\n]+)`|(\S+))[^\S\n]*\n?/gm
 
-export function userContent(content: unknown): Pick<UserItem, 'text' | 'images' | 'photos'> {
+export function userContent(content: unknown): Pick<UserItem, 'text' | 'images' | 'photos' | 'files'> {
   const images = contentImages(content)
+  const files: string[] = []
   let refs = 0
-  let text = contentText(content).replace(IMAGE_REF_LINE, () => {
-    refs++
+  let text = contentText(content)
+    .replace(IMAGE_REF_LINE, () => {
+      refs++
 
-    return ''
-  })
+      return ''
+    })
+    .replace(FILE_REF_LINE, (_line, quoted?: string, ticked?: string, bare?: string) => {
+      files.push((quoted ?? ticked ?? bare ?? '').split('/').pop() || 'File')
+
+      return ''
+    })
 
   if (refs) {
     text = text.replace(SCREENSHOT_LINE, '')
@@ -72,7 +83,7 @@ export function userContent(content: unknown): Pick<UserItem, 'text' | 'images' 
   // Pictures that came back as data are shown as pictures; the rest as chips.
   const photos = Math.max(0, refs - (images?.length ?? 0))
 
-  return { text: text.trim(), images, ...(photos ? { photos } : {}) }
+  return { text: text.trim(), images, ...(photos ? { photos } : {}), ...(files.length ? { files } : {}) }
 }
 
 export function contentText(content: unknown): string {

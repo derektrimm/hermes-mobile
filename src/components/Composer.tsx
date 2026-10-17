@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
-import { type Attachment, commandCatalog, send, stop } from '../lib/hermes'
+import { type Attachment, commandCatalog, send, steer, stop } from '../lib/hermes'
 import { drafts, saveDraft } from '../lib/drafts'
 import { haptic } from '../lib/haptics'
 import { SERVER } from '../lib/site'
-import { type Chat, setState, useStore } from '../lib/store'
-import { CloseIcon, MonitorIcon, PlusIcon, SendIcon, StopIcon } from './icons'
+import { type Chat, setState, toast, useStore } from '../lib/store'
+import { CloseIcon, FileIcon, MonitorIcon, PlusIcon, SendIcon, StopIcon } from './icons'
 
 // Terminal-UI commands the gateway cannot run for a phone (tui_gateway/AGENTS.md, slash command flow).
 const LOCAL_ONLY = new Set(['/quit', '/exit', '/resume', '/copy', '/paste', '/model'])
@@ -21,7 +21,34 @@ async function shrink(file: File): Promise<Attachment> {
   canvas.getContext('2d')?.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
   bitmap.close()
 
-  return { name: file.name.replace(/\.\w+$/, '') + '.jpg', dataUrl: canvas.toDataURL('image/jpeg', 0.85) }
+  return { name: file.name.replace(/\.\w+$/, '') + '.jpg', dataUrl: canvas.toDataURL('image/jpeg', 0.85), kind: 'image' }
+}
+
+// Anything else goes as it is, into the chat's workspace; the whole file rides the phone's network.
+const FILE_LIMIT = 20 * 1024 * 1024
+
+function readFile(file: File): Promise<Attachment> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve({ name: file.name || 'file', dataUrl: String(reader.result), kind: 'file' })
+    reader.onerror = () => reject(reader.error ?? new Error(`Could not read ${file.name}`))
+    reader.readAsDataURL(file)
+  })
+}
+
+// Pictures the browser can draw are resized; others (HEIC on some browsers, SVG) go as files.
+const DRAWN = /^image\/(jpeg|png|gif|webp|bmp|heic|heif|avif)$/
+
+async function attachment(file: File): Promise<Attachment> {
+  if (DRAWN.test(file.type)) {
+    try {
+      return await shrink(file)
+    } catch {
+      // a picture this browser cannot decode: send it as it is
+    }
+  }
+
+  return readFile(file)
 }
 
 export function Composer({ chat }: { chat: Chat }) {
@@ -29,13 +56,22 @@ export function Composer({ chat }: { chat: Chat }) {
   const [text, setText] = useState(() => drafts.get(key) ?? '')
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [busy, setBusy] = useState(false)
+  // While a turn runs, a message waits for it to end, or steers it at its next step.
+  const [steering, setSteering] = useState(false)
   const [commands, setCommands] = useState<Array<{ name: string; description: string }> | null>(null)
   const input = useRef<HTMLTextAreaElement>(null)
   const picker = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
+    if (!chat.running) {
+      setSteering(false)
+    }
+  }, [chat.running])
+
+  useEffect(() => {
     setText(drafts.get(key) ?? '')
     setAttachments([])
+    setSteering(false)
     setCommands(null) // another chat can be another account, with other skills
   }, [key])
 
@@ -89,7 +125,9 @@ export function Composer({ chat }: { chat: Chat }) {
   const placeholder = !online
     ? `Waiting for ${SERVER}`
     : chat.running
-      ? 'Add a follow-up'
+      ? steering
+        ? 'Steer this turn'
+        : 'Add a follow-up'
       : remote
         ? chat.shared?.holder === 'pc-shared' || chat.watch?.holder === 'pc-window'
           ? 'Message Hermes on your PC'
@@ -108,7 +146,7 @@ export function Composer({ chat }: { chat: Chat }) {
     setText('')
     setAttachments([])
 
-    const ok = await send(body, files)
+    const ok = steering && chat.running && !files.length ? await steer(body) : await send(body, files)
     setBusy(false)
 
     if (!ok) {
@@ -122,9 +160,24 @@ export function Composer({ chat }: { chat: Chat }) {
       return
     }
 
-    const added = await Promise.all([...files].filter(f => f.type.startsWith('image/')).map(shrink))
+    const picked = [...files]
+    const tooBig = picked.filter(f => !DRAWN.test(f.type) && f.size > FILE_LIMIT)
+
+    if (tooBig.length) {
+      toast(`${tooBig.map(f => f.name).join(', ')} ${tooBig.length === 1 ? 'is' : 'are'} over 20 MB. Send ${tooBig.length === 1 ? 'it' : 'them'} from the PC.`, 'error')
+    }
+
+    const results = await Promise.allSettled(picked.filter(f => !tooBig.includes(f)).map(attachment))
+    const added = results.flatMap(r => (r.status === 'fulfilled' ? [r.value] : []))
+
+    if (results.some(r => r.status === 'rejected')) {
+      toast('A file could not be read on this phone.', 'error')
+    }
+
     setAttachments(current => [...current, ...added].slice(0, 6))
   }
+
+  const showMode = chat.running && online && !chat.watch && !attachments.length && (text.trim().length > 0 || steering)
 
   return (
     <div className="composer-wrap">
@@ -172,11 +225,18 @@ export function Composer({ chat }: { chat: Chat }) {
         {attachments.length ? (
           <div className="attachments">
             {attachments.map((a, i) => (
-              <div key={i} className="attachment">
-                <img src={a.dataUrl} alt="" />
+              <div key={i} className={`attachment ${a.kind}`}>
+                {a.kind === 'image' ? (
+                  <img src={a.dataUrl} alt="" />
+                ) : (
+                  <span className="attachment-file">
+                    <FileIcon size={16} />
+                    <span>{a.name}</span>
+                  </span>
+                )}
                 <button
                   type="button"
-                  aria-label="Remove image"
+                  aria-label={`Remove ${a.kind === 'image' ? 'photo' : a.name}`}
                   onClick={() => setAttachments(current => current.filter((_, j) => j !== i))}
                 >
                   <CloseIcon size={13} />
@@ -185,14 +245,23 @@ export function Composer({ chat }: { chat: Chat }) {
             ))}
           </div>
         ) : null}
+        {showMode ? (
+          <div className="followup-mode" role="radiogroup" aria-label="While Hermes works">
+            <button type="button" role="radio" aria-checked={!steering} className={steering ? '' : 'on'} onClick={() => setSteering(false)}>
+              After this turn
+            </button>
+            <button type="button" role="radio" aria-checked={steering} className={steering ? 'on' : ''} onClick={() => setSteering(true)}>
+              Steer now
+            </button>
+          </div>
+        ) : null}
         <div className="composer-row">
-          <button type="button" className="icon-btn round" aria-label="Add photos" onClick={() => picker.current?.click()}>
+          <button type="button" className="icon-btn round" aria-label="Add photos or files" onClick={() => picker.current?.click()}>
             <PlusIcon size={20} />
           </button>
           <input
             ref={picker}
             type="file"
-            accept="image/*"
             multiple
             hidden
             onChange={event => {
@@ -235,7 +304,7 @@ export function Composer({ chat }: { chat: Chat }) {
             <button
               type="button"
               className="send"
-              aria-label={chat.running ? 'Send follow-up' : 'Send'}
+              aria-label={chat.running ? (steering && !attachments.length ? 'Steer' : 'Send follow-up') : 'Send'}
               disabled={!canSend}
               onClick={() => void submit()}
             >

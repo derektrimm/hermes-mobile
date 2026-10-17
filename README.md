@@ -17,7 +17,18 @@ Home Screen).
 ## What it does
 
 - Chat with Hermes the way the desktop app does: streaming answers, tool steps grouped into one
-  collapsible "worked" block, reasoning, a live plan, Stop, queued follow-ups, photos, `/` commands.
+  collapsible "worked" block, reasoning, a live plan, Stop, queued follow-ups, `/` commands.
+- Attach photos (resized on the phone) or any other file up to 20 MB: files are staged in the chat's
+  workspace with Hermes's `file.attach` and named in the prompt, as the desktop app sends them.
+- While a turn runs, a message either waits for it ("After this turn", the default) or steers it
+  ("Steer now"): Hermes reads it at its next step without stopping (`session.steer`; typed as
+  `/steer` into a shared PC window, so the window shows it). A steer Hermes refuses runs after the
+  turn instead.
+- Files a reply delivers (`MEDIA:/path`, or a Markdown image of a local path) show where the reply
+  puts them: pictures inline and full screen with Share, video and audio in players, text to read,
+  other documents to the share sheet. `/hm/file` reads them through the chat's own backend (a PC
+  chat's files come from the PC) and serves only media and document types, never from a hidden folder
+  other than Hermes's own media folders (`server/files.mjs`), with a sandboxing content policy.
 - Every chat from every Hermes profile in one list, with search across titles and message contents.
 - **Remote control of the desktop app.** A chat open in the Hermes desktop app is joined in the
   desktop app's own backend (`session.activate` adds the phone as one more client of the same live
@@ -105,8 +116,9 @@ iPhone --https, tailnet only--> tailscale serve :8620 --> unix socket (0700 dir)
 | `deploy/deploy.sh` | build, copy to the server, (re)start `hermes-mobile.service`, set the tailnet listener, probe |
 | `scripts/sync-hermes-shared.sh` | refresh the vendored Hermes client after `hermes update`, then deploy |
 | `npm test` | unit tests (transcript mapping, names) |
-| `npm run test:e2e` | the app against a stand-in gateway on the live deployment: questions, queued follow-ups, interim and final answers, reclaimed runtimes, skill commands, photo rollback, sends racing a chat switch or a PC turn, reconnects, turns typed on the PC, Stop |
+| `npm run test:e2e` | the app against a stand-in gateway on the live deployment: questions, queued follow-ups, interim and final answers, reclaimed runtimes, skill commands, photo rollback, sends racing a chat switch or a PC turn, reconnects, turns typed on the PC, Stop, file attachments, steering, files in replies |
 | `node test/e2e/held-live.mjs "<chat>"`, `autoshare-live.mjs "<chat>"` | live checks against a real older PC window |
+| `node test/e2e/attach-live.mjs` | a file attached from the phone and a steer into a running turn, against the real backend in a throwaway chat (deleted after) |
 | `node test/e2e/push-live.mjs` | notifications through a real push service (Firefox and Mozilla's): subscribe in the sheet, a test, a reply, quiet while on screen, a question, off; `HM_LIVE_TURN=1` adds a real Hermes turn in a throwaway chat, deleted after |
 | `journalctl --user -u hermes-mobile` (server) | server log, including refused devices and hand-offs |
 

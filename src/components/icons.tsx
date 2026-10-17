@@ -191,6 +191,13 @@ export const BellIcon = (p: IconProps) => (
   </Icon>
 )
 
+export const ShareIcon = (p: IconProps) => (
+  <Icon {...p}>
+    <path d="M12 3.5v11M8 7.5l4-4 4 4" />
+    <path d="M7.5 10.5H6a1.5 1.5 0 0 0-1.5 1.5v7A1.5 1.5 0 0 0 6 20.5h12a1.5 1.5 0 0 0 1.5-1.5v-7a1.5 1.5 0 0 0-1.5-1.5h-1.5" />
+  </Icon>
+)
+
 export const MoreIcon = (p: IconProps) => (
   <Icon {...p}>
     <circle cx="6" cy="12" r="1.3" fill="currentColor" stroke="none" />

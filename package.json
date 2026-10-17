@@ -9,7 +9,7 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --noEmit",
     "test": "node --test test/*.test.ts",
-    "test:e2e": "node test/e2e/asks.mjs && node test/e2e/reducer.mjs && node test/e2e/reconnect.mjs && node test/e2e/codrive.mjs",
+    "test:e2e": "node test/e2e/asks.mjs && node test/e2e/reducer.mjs && node test/e2e/reconnect.mjs && node test/e2e/codrive.mjs && node test/e2e/attach.mjs",
     "sync:hermes": "scripts/sync-hermes-shared.sh"
   },
   "dependencies": {

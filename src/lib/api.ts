@@ -148,10 +148,10 @@ export const api = {
     call<{ ok: boolean; backend?: string }>('/hm/hands-start', { method: 'POST', body: JSON.stringify({ instance }) }, 45_000),
 
   /** Type a message into the shared PC window showing this chat (see server typeIntoWindow). */
-  typeInWindow: (sessionId: string, text: string, running: boolean) =>
-    call<{ ok: boolean; typed: boolean; queued?: boolean; stuck?: boolean; reason?: string }>('/hm/type', {
+  typeInWindow: (sessionId: string, text: string, running: boolean, steer = false) =>
+    call<{ ok: boolean; typed: boolean; queued?: boolean; steered?: boolean; stuck?: boolean; reason?: string }>('/hm/type', {
       method: 'POST',
-      body: JSON.stringify({ session_id: sessionId, text, running })
+      body: JSON.stringify({ session_id: sessionId, text, running, steer })
     }),
 
   phoneChat: (sessionId: string) =>

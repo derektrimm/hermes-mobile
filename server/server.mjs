@@ -11,6 +11,8 @@ import { execFile, spawn } from 'node:child_process'
 import { createReadStream, existsSync } from 'node:fs'
 import { chmod, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +20,7 @@ import { promisify } from 'node:util'
 
 import { WebSocket, WebSocketServer } from 'ws'
 
+import { fileAllowed, fileType } from './files.mjs'
 import { cleanPrefs, clip, encrypt, loadVapid, notificationBody, Notifier, PushStore, pushEndpointAllowed, sendPush } from './push.mjs'
 
 const run = promisify(execFile)
@@ -921,7 +924,7 @@ const TUI_PLACEHOLDERS = new Set([
  * plain line would follow the profile's busy mode (interrupt). Anything else answers with a reason
  * and the phone sends the usual way.
  */
-async function typeIntoWindow(sessionId, text, running) {
+async function typeIntoWindow(sessionId, text, running, steer = false) {
   // The TUI runs a line starting with "!" as a shell command, and splices the output of "{!cmd}"
   // into the prompt (ui-tui useSubmission.ts, protocol/interpolation.ts). Typed from the phone those
   // would run commands where a message was meant: such text goes over the socket instead.
@@ -961,8 +964,10 @@ async function typeIntoWindow(sessionId, text, running) {
     return { typed: false, reason: 'not-at-prompt' }
   }
 
+  // A steer joins the running turn at its next step (the TUI's /steer); once the turn is over it is
+  // simply the next message.
   const queued = running || before.busy
-  const line = queued ? `/queue ${text}` : text
+  const line = queued ? `${steer ? '/steer' : '/queue'} ${text}` : text
   const buffer = `hm-type-${process.pid}`
 
   // A bracketed paste keeps line breaks in the message instead of sending at the first one.
@@ -980,15 +985,15 @@ async function typeIntoWindow(sessionId, text, running) {
     await new Promise(resolve => setTimeout(resolve, 150))
 
     if ((await state()).empty) {
-      log(`type: ${queued ? 'queued' : 'sent'} a phone message in ${socket} for ${sessionId}`)
+      log(`type: ${queued ? (steer ? 'steered' : 'queued') : 'sent'} a phone message in ${socket} for ${sessionId}`)
 
-      return { typed: true, queued }
+      return { typed: true, queued: queued && !steer, steered: queued && steer }
     }
   }
 
   log(`type: the message stayed in ${socket}'s input line`)
 
-  return { typed: true, queued, stuck: true }
+  return { typed: true, queued: queued && !steer, steered: queued && steer, stuck: true }
 }
 
 const sharesInFlight = new Map()
@@ -1434,6 +1439,92 @@ async function handlePush(req, res, url, who) {
   }
 }
 
+// ---------------------------------------------------------------- files a chat shows
+
+// A file a reply names (see files.mjs), read by the chat's own backend so a PC chat's file comes
+// from the PC, as in the desktop app. Range requests pass through, so video plays.
+async function serveChatFile(req, res, url) {
+  const filePath = url.searchParams.get('path') || ''
+  const profile = url.searchParams.get('profile') || 'default'
+
+  if (!fileAllowed(filePath) || !/^[\w.-]{1,64}$/.test(profile)) {
+    res.writeHead(403, { 'content-type': 'text/plain' }).end('This file cannot be shown here.')
+
+    return
+  }
+
+  const backend = await backendUrl(url.searchParams.get('backend') || 'main')
+
+  if (!backend) {
+    res.writeHead(404, { 'content-type': 'text/plain' }).end('The chat that made this file is no longer open there.')
+
+    return
+  }
+
+  // The backend has a minute to start answering; the body then streams for as long as it takes,
+  // and stops when the phone goes away (a video skipped or closed).
+  const query = new URLSearchParams({ path: filePath, profile })
+  const abort = new AbortController()
+  res.on('close', () => abort.abort())
+  const fetchFile = async force => {
+    const timer = setTimeout(() => abort.abort(), 60_000)
+
+    try {
+      return await fetch(`${backend}/api/fs/download?${query}`, {
+        headers: {
+          'x-hermes-session-token': await backendToken(backend, force),
+          ...(req.headers.range ? { range: String(req.headers.range) } : {})
+        },
+        signal: abort.signal
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  let response = await fetchFile(false)
+
+  if (response.status === 401) {
+    await response.arrayBuffer().catch(() => null)
+    response = await fetchFile(true)
+  }
+
+  if (!response.ok) {
+    await response.arrayBuffer().catch(() => null)
+    res.writeHead(response.status === 403 ? 403 : 404, { 'content-type': 'text/plain' }).end('This file is not available.')
+
+    return
+  }
+
+  const type = fileType(filePath)
+  const headers = {
+    'content-type': type,
+    'content-disposition': `${type === 'application/zip' ? 'attachment' : 'inline'}; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`,
+    // Shown from this app's own address: a served file never runs anything.
+    'content-security-policy': "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'",
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'private, max-age=300'
+  }
+
+  for (const name of ['content-length', 'content-range', 'accept-ranges']) {
+    const value = response.headers.get(name)
+
+    if (value) {
+      headers[name] = value
+    }
+  }
+
+  res.writeHead(response.status, headers)
+
+  if (req.method === 'HEAD') {
+    await response.body?.cancel()
+    res.end()
+
+    return
+  }
+
+  await pipeline(Readable.fromWeb(response.body), res).catch(() => undefined)
+}
+
 // ---------------------------------------------------------------- static app
 
 const TYPES = {
@@ -1544,6 +1635,12 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
+    if (url.pathname === '/hm/file' && (req.method === 'GET' || req.method === 'HEAD')) {
+      await serveChatFile(req, res, url)
+
+      return
+    }
+
     if (url.pathname === '/hm/push' || url.pathname.startsWith('/hm/push/') || url.pathname === '/hm/presence') {
       await handlePush(req, res, url, who)
 
@@ -1601,7 +1698,7 @@ const server = http.createServer(async (req, res) => {
 
       // One message at a time per window, in the order they arrive.
       const previous = typing.get(body.session_id) ?? Promise.resolve()
-      const next = previous.catch(() => undefined).then(() => typeIntoWindow(body.session_id, body.text, Boolean(body.running)))
+      const next = previous.catch(() => undefined).then(() => typeIntoWindow(body.session_id, body.text, Boolean(body.running), body.steer === true))
       typing.set(body.session_id, next)
       const result = await next.catch(error => ({ typed: false, reason: 'error', error: String(error) }))
 

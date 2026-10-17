@@ -3,9 +3,11 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'rea
 import { copyText } from '../lib/clipboard'
 import { friendlyTool } from '../lib/hermes'
 import { handleCopyClick, renderMarkdown } from '../lib/markdown'
+import { splitMedia } from '../lib/media'
 import type { Chat, Todo } from '../lib/store'
 import type { AssistantItem, Item, NoticeItem, ToolItem, UserItem } from '../lib/transcript'
-import { ArrowDownIcon, BrainIcon, CheckIcon, ChevronIcon, CloseIcon, CopyIcon, ImageIcon, ListIcon, toolIcon } from './icons'
+import { ArrowDownIcon, BrainIcon, CheckIcon, ChevronIcon, CloseIcon, CopyIcon, FileIcon, ImageIcon, ListIcon, toolIcon } from './icons'
+import { MediaFiles } from './Media'
 
 interface Thought {
   kind: 'thought'
@@ -274,12 +276,16 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function AssistantBlock({ item, last }: { item: AssistantItem; last: boolean }) {
+  const { text, parts } = useMemo(() => splitMedia(item.text, Boolean(item.streaming)), [item.text, item.streaming])
+
   return (
     <div className={`msg assistant ${item.streaming ? 'streaming' : ''}`}>
-      <Markdown text={item.text.replace(/^\s+/, '')} />
+      {parts.map((part, i) =>
+        part.kind === 'text' ? <Markdown key={i} text={part.text.replace(/^\s+/, '')} /> : <MediaFiles key={i} media={part.media} />
+      )}
       {last ? (
         <div className="msg-actions">
-          <CopyButton text={item.text.trim()} />
+          <CopyButton text={text.trim()} />
         </div>
       ) : null}
     </div>
@@ -288,7 +294,7 @@ function AssistantBlock({ item, last }: { item: AssistantItem; last: boolean }) 
 
 function UserBlock({ item }: { item: UserItem }) {
   // A turn started on another device: an empty marker until its prompt has been read back.
-  if (item.peer && !item.text && !item.images?.length) {
+  if (item.peer && !item.text && !item.images?.length && !item.files?.length) {
     return null
   }
 
@@ -307,6 +313,16 @@ function UserBlock({ item }: { item: UserItem }) {
             <span key={i} className="photo-chip">
               <ImageIcon size={15} />
               Photo
+            </span>
+          ))}
+        </div>
+      ) : null}
+      {item.files?.length ? (
+        <div className="msg-files">
+          {item.files.map((name, i) => (
+            <span key={i} className="photo-chip">
+              <FileIcon size={15} />
+              <span>{name}</span>
             </span>
           ))}
         </div>

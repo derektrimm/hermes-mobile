@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { compactionReply, fromStored, fromTranscript } from '../src/lib/transcript.ts'
+import { compactionReply, fromStored, fromTranscript, userContent } from '../src/lib/transcript.ts'
 
 test('gateway transcript keeps user, answer, reasoning and tool rows in order', () => {
   const items = fromTranscript([
@@ -74,4 +74,13 @@ test('stored rows pair tool calls with their results; unanswered calls stay runn
       ['/etc/hostname', 'running', null]
     ]
   )
+})
+
+test('attached files leave the bubble text and show by name', () => {
+  assert.deepEqual(userContent('@file:attachments/report.pdf\n@file:"attachments/Q3 numbers.csv"\n\nSummarize these'), {
+    text: 'Summarize these',
+    images: [],
+    files: ['report.pdf', 'Q3 numbers.csv']
+  })
+  assert.deepEqual(userContent('Use @file:x.txt inline'), { text: 'Use @file:x.txt inline', images: [] })
 })

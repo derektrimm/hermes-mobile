@@ -1146,6 +1146,19 @@ async function ensureRuntime(target: Target): Promise<string> {
 export interface Attachment {
   name: string
   dataUrl: string
+  /** A picture goes to the model as an image; anything else into the chat's workspace as a file. */
+  kind: 'image' | 'file'
+}
+
+/** What a chat with only attachments is called until it has words. */
+function attachmentTitle(attachments: Attachment[]) {
+  const pictures = attachments.filter(a => a.kind === 'image').length
+
+  if (pictures === attachments.length) {
+    return pictures === 1 ? 'Photo' : `${pictures} photos`
+  }
+
+  return attachments.length === 1 ? attachments[0].name : `${attachments.length} attachments`
 }
 
 /**
@@ -1175,7 +1188,7 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
   // wait in that queue, so they stay in the composer until the phone has joined.
   if (visible && getState().chat.watch) {
     if (attachments.length) {
-      toast('Photos can go once the phone has joined this chat. They are still in the composer.', 'info')
+      toast('Attachments can go once the phone has joined this chat. They are still in the composer.', 'info')
 
       return false
     }
@@ -1225,15 +1238,45 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
     setChat(c => ({ queued: [...c.queued, { id: localKey, text: trimmed }] }))
   } else {
     setChat(c => ({
-      items: [...c.items, { kind: 'user', id: localKey, text: trimmed, images: attachments.map(a => a.dataUrl), pending: true }]
+      items: [
+        ...c.items,
+        {
+          kind: 'user',
+          id: localKey,
+          text: trimmed,
+          images: attachments.filter(a => a.kind === 'image').map(a => a.dataUrl),
+          files: attachments.filter(a => a.kind === 'file').map(a => a.name),
+          pending: true
+        }
+      ]
     }))
   }
 
   const uploaded: string[] = []
+  // Files go into the chat's workspace and the prompt names them ("@file:" refs, as the desktop app
+  // sends them); pictures wait on the session for the next prompt.
+  const refs: string[] = []
   let liveId: string | null = null
+  const prompt = () => [refs.join('\n'), trimmed].filter(Boolean).join('\n\n')
 
   const upload = async (id: string) => {
     for (const attachment of attachments) {
+      if (attachment.kind === 'file') {
+        const result = await rpcOn<{ attached?: boolean; ref_text?: string }>(target.backend, 'file.attach', {
+          session_id: id,
+          profile: target.profile,
+          data_url: attachment.dataUrl,
+          name: attachment.name
+        })
+
+        if (!result?.attached || !result.ref_text) {
+          throw new Error(`Could not attach ${attachment.name}.`)
+        }
+
+        refs.push(result.ref_text)
+        continue
+      }
+
       const result = await rpcOn<{ path?: string | null }>(target.backend, 'image.attach_bytes', {
         session_id: id,
         profile: target.profile,
@@ -1268,12 +1311,12 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
 
     await upload(liveId)
 
-    const params: PromptSubmitParams = { session_id: liveId, profile: target.profile, text: trimmed }
+    const params: PromptSubmitParams = { session_id: liveId, profile: target.profile, text: prompt() }
 
-    // With photos attached Hermes prefixes the prompt with a note about them; title the chat
-    // from what was actually typed instead.
+    // With attachments the prompt starts with notes and refs about them; title the chat from what
+    // was actually typed instead.
     if (attachments.length) {
-      params.title_preview = trimmed || (attachments.length === 1 ? 'Photo' : `${attachments.length} photos`)
+      params.title_preview = trimmed || attachmentTitle(attachments)
     }
 
     // Always "run after", never a live correction: with the chat shared, the PC can start a turn a
@@ -1325,8 +1368,10 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
       liveId = await ensureRuntime(retarget)
       target.backend = retarget.backend
       uploaded.length = 0
+      refs.length = 0
       await upload(liveId)
       params.session_id = liveId
+      params.text = prompt()
       result = await submit()
     }
 
@@ -1411,6 +1456,75 @@ function markUser(id: string, patch: Partial<Item>) {
 
 function pushNotice(text: string, tone: 'info' | 'warn' | 'error', output = false) {
   setChat(c => ({ items: [...c.items, { kind: 'notice', id: localId('n'), text, tone, ...(output ? { output } : {}) }] }))
+}
+
+/**
+ * Steer the running turn: Hermes reads the text at its next step, without stopping (session.steer,
+ * the TUI's /steer). In a chat shared with a PC window it is typed there as /steer, so the window
+ * shows it. A turn that has ended meanwhile takes it as the next message.
+ */
+export async function steer(text: string): Promise<boolean> {
+  const trimmed = text.trim()
+  const target = captureTarget()
+  const { chat } = getState()
+
+  if (!trimmed) {
+    return false
+  }
+
+  if (!chat.running || chat.watch) {
+    return send(trimmed, [], target)
+  }
+
+  if (target.storedId && chat.shared?.holder === 'pc-shared') {
+    const typed = await api.typeInWindow(target.storedId, trimmed, true, true).catch(() => null)
+
+    if (typed?.typed) {
+      if (onScreen(target)) {
+        pushNotice(typed.steered ? `Steered: ${trimmed}` : `Sent: ${trimmed}`, 'info')
+      }
+
+      if (typed.stuck) {
+        toast('Your message is in the PC window but did not send. Press Enter there.', 'error')
+      }
+
+      return true
+    }
+  }
+
+  if (!target.liveId) {
+    return send(trimmed, [], target)
+  }
+
+  try {
+    const result = await rpcOn<{ status?: string }>(target.backend, 'session.steer', {
+      session_id: target.liveId,
+      profile: target.profile,
+      text: trimmed
+    })
+
+    if (result?.status === 'rejected') {
+      toast('Hermes could not take that mid-turn, so it runs after this turn.')
+
+      return send(trimmed, [], target)
+    }
+
+    notePhoneSent(target.storedId)
+
+    if (onScreen(target)) {
+      pushNotice(`Steered: ${trimmed}`, 'info')
+    }
+
+    return true
+  } catch (error) {
+    if (runtimeGone(error)) {
+      return send(trimmed, [], target)
+    }
+
+    toast(errorText(error), 'error')
+
+    return false
+  }
 }
 
 export async function stop() {
