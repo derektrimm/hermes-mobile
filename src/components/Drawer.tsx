@@ -7,7 +7,8 @@ import { accountLabel } from '../lib/labels'
 import { haptic } from '../lib/haptics'
 import { SERVER } from '../lib/site'
 import { confirmAction, setState, toast, useStore } from '../lib/store'
-import { ComposeIcon, MoreIcon, PencilIcon, SearchIcon, TrashIcon } from './icons'
+import { BellIcon, ComposeIcon, MoreIcon, PencilIcon, SearchIcon, TrashIcon } from './icons'
+import { NotificationsSheet } from './Notifications'
 import { Sheet } from './Sheet'
 
 const SOURCES: Record<string, string> = {
@@ -142,6 +143,7 @@ export function Drawer() {
   const [hits, setHits] = useState<SearchHit[] | null>(null)
   const [menu, setMenu] = useState<SessionRow | null>(null)
   const [renaming, setRenaming] = useState('')
+  const [notifications, setNotifications] = useState(false)
 
   useEffect(() => {
     if (!open) {
@@ -265,9 +267,13 @@ export function Drawer() {
         </div>
         <div className="drawer-foot">
           <span className={`dot ${conn === 'open' ? 'ok' : 'busy'}`} />
-          {conn === 'open' ? `Connected to ${SERVER}` : 'Reconnecting…'}
+          <span className="drawer-foot-text">{conn === 'open' ? `Connected to ${SERVER}` : 'Reconnecting…'}</span>
+          <button type="button" className="icon-btn subtle" aria-label="Notifications" onClick={() => setNotifications(true)}>
+            <BellIcon size={20} />
+          </button>
         </div>
       </aside>
+      <NotificationsSheet open={notifications} onClose={() => setNotifications(false)} />
       <Sheet open={Boolean(menu)} onClose={() => setMenu(null)} title={menu?.title || 'Chat'}>
         {menu ? (
           <div className="sheet-actions">

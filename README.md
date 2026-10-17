@@ -51,6 +51,13 @@ Home Screen).
   message sent over the socket is "run after", so it can never interrupt a turn the PC just started.
 - Approvals, clarify questions and sudo/secret prompts appear as cards. A question from a chat that
   is not on screen shows as a banner that jumps to it.
+- Notifications while the app is closed (the bell at the foot of the chat list): when Hermes needs
+  you (an approval, a question, a sudo password), a reply is ready, a turn fails, or a background task
+  finishes, each kind switchable per device. A tap opens that chat. A chat on screen on any device
+  stays quiet, and so does a reply that comes within two minutes of a turn typed in a PC window or
+  the desktop app that has the chat open (you were most likely watching); a question there notifies
+  if it is still unanswered after those two minutes. Messaging platforms, editors (ACP) and subagents
+  never notify. On an iPhone, notifications need the app opened from the Home Screen.
 - Model and reasoning effort per chat (never rewrite the profile default), rename, delete. Effort
   runs Off (where the model can skip reasoning), Minimal, Low, Medium, High, Extra High, Max, Ultra;
   a model that tops out lower receives its highest level, and the sheet says so.
@@ -77,6 +84,13 @@ iPhone --https, tailnet only--> tailscale serve :8620 --> unix socket (0700 dir)
   backend's session token, which never reaches the phone), bridges `/api/ws` (the same JSON-RPC
   gateway the desktop app uses), and adds `/hm/live` (who holds each conversation, from Hermes's
   lease files) and `/hm/share`.
+- Notifications: `plugin/hermes_mobile_push`, a Hermes plugin enabled in every profile by
+  `deploy/deploy.sh`, reports turns, replies, waits on a person and background tasks over
+  `events.sock`, a second socket in the app's 0700 directory, so only this account can send events.
+  `server/push.mjs` decides what is worth a notification and sends it by Web Push, encrypted for the
+  device (RFC 8291) and signed with this server's own key (RFC 8292, kept owner-only in
+  `~/.local/state/hermes-mobile/vapid.json`). The push service (Apple's, for an iPhone) relays only
+  ciphertext; the server posts only to known push services.
 - Access: requests must come from the app's own page (Origin check: other sites cannot use your
   device's tailnet identity), the `Tailscale-User-Login` must be in `HM_ALLOWED_LOGINS`, **and** the
   device must be in `HM_ALLOWED_DEVICES` (MagicDNS names). Never list the server itself: its other
@@ -93,6 +107,7 @@ iPhone --https, tailnet only--> tailscale serve :8620 --> unix socket (0700 dir)
 | `npm test` | unit tests (transcript mapping, names) |
 | `npm run test:e2e` | the app against a stand-in gateway on the live deployment: questions, queued follow-ups, interim and final answers, reclaimed runtimes, skill commands, photo rollback, sends racing a chat switch or a PC turn, reconnects, turns typed on the PC, Stop |
 | `node test/e2e/held-live.mjs "<chat>"`, `autoshare-live.mjs "<chat>"` | live checks against a real older PC window |
+| `node test/e2e/push-live.mjs` | notifications through a real push service (Firefox and Mozilla's): subscribe in the sheet, a test, a reply, quiet while on screen, a question, off; `HM_LIVE_TURN=1` adds a real Hermes turn in a throwaway chat, deleted after |
 | `journalctl --user -u hermes-mobile` (server) | server log, including refused devices and hand-offs |
 
 Phone chats run in the Hermes backend on the server, so their tools act on the server. A chat started

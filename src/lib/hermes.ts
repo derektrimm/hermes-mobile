@@ -4,6 +4,7 @@
 import { api, HttpError, type SessionRow } from './api'
 import { type Ask, type AskMethod, type Chat, confirmAction, emptyChat, getState, rememberOpenChat, restoreChat, setChat, setState, type State, toast } from './store'
 import { drafts, saveDraft } from './drafts'
+import { notePhoneSent } from './push'
 import { SERVER } from './site'
 import { displayTitle } from './format'
 import { modelLabel } from './labels'
@@ -222,6 +223,20 @@ window.addEventListener('online', () => gateways.forEach(g => g.wake()))
 
 let restored = false
 
+// A notification tapped while the app was closed launches it on that chat (public/sw.js).
+const launchChat = (() => {
+  const params = new URLSearchParams(location.search)
+  const id = params.get('chat')
+
+  if (!id) {
+    return null
+  }
+
+  history.replaceState(null, '', '/')
+
+  return { id, profile: params.get('profile') || 'default' }
+})()
+
 async function onGatewayOpen(key: string, reconnected: boolean) {
   if (key === MAIN) {
     void refreshProfiles()
@@ -230,7 +245,14 @@ async function onGatewayOpen(key: string, reconnected: boolean) {
 
     // First connection after a launch: reopen the chat that was on screen, if it still exists and
     // nothing else has been opened meanwhile.
-    if (!restored && restoreChat) {
+    if (!restored && launchChat) {
+      restored = true
+      await sessions
+
+      if (!getState().chat.storedId) {
+        openFromNotification(launchChat)
+      }
+    } else if (!restored && restoreChat) {
       restored = true
       const target = restoreChat
       await sessions
@@ -1308,6 +1330,8 @@ export async function send(text: string, attachments: Attachment[] = [], given?:
       result = await submit()
     }
 
+    notePhoneSent(target.storedId ?? storedIdFor(liveId))
+
     if (!onScreen(target)) {
       toast('Sent to the chat you left')
 
@@ -1810,6 +1834,18 @@ function titleFor(liveId: string) {
   const storedId = storedIdFor(liveId)
 
   return getState().sessions.find(s => s.id === storedId)?.title || 'A Hermes chat'
+}
+
+/** Open the chat a notification was about (a tap while the app runs, or the launch it caused). */
+export function openFromNotification(chat: { id: string; profile: string }) {
+  if (getState().chat.storedId === chat.id) {
+    setState({ drawer: false })
+
+    return
+  }
+
+  const row = getState().sessions.find(s => s.id === chat.id && s.profile === chat.profile)
+  void openSession({ id: chat.id, profile: chat.profile, title: row?.title ?? null })
 }
 
 export async function openByLiveId(liveId: string) {

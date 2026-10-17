@@ -92,3 +92,73 @@ async function pruneAssets(html) {
     }
   }
 }
+
+// ---------------------------------------------------------------- notifications
+
+// A push from the server (server/push.mjs): show it, one per chat (a newer one replaces the last),
+// and count what is waiting on the app icon.
+self.addEventListener('push', event => {
+  let message = {}
+
+  try {
+    message = event.data ? event.data.json() : {}
+  } catch {
+    message = { body: event.data ? event.data.text() : '' }
+  }
+
+  event.waitUntil(
+    self.registration
+      .showNotification(message.title || 'Hermes', {
+        body: message.body || '',
+        tag: message.tag || undefined,
+        timestamp: message.at || Date.now(),
+        icon: '/icons/icon-192.png',
+        data: { chat: message.chat || null, kind: message.kind || null }
+      })
+      .then(updateBadge)
+  )
+})
+
+// A tap opens that chat: in the app if it is running, else by launching it on the chat.
+self.addEventListener('notificationclick', event => {
+  event.notification.close()
+  const chat = event.notification.data?.chat || null
+
+  event.waitUntil(
+    (async () => {
+      const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      const app = windows.find(client => new URL(client.url).origin === self.location.origin)
+
+      if (app) {
+        await app.focus()
+
+        if (chat) {
+          app.postMessage({ type: 'open-chat', chat })
+        }
+      } else {
+        const query = chat ? `?chat=${encodeURIComponent(chat.id)}&profile=${encodeURIComponent(chat.profile)}` : ''
+        await self.clients.openWindow(`/${query}`)
+      }
+
+      await updateBadge()
+    })()
+  )
+})
+
+self.addEventListener('notificationclose', event => {
+  event.waitUntil(updateBadge())
+})
+
+async function updateBadge() {
+  const count = (await self.registration.getNotifications()).length
+
+  try {
+    if (count) {
+      await self.navigator.setAppBadge?.(count)
+    } else {
+      await self.navigator.clearAppBadge?.()
+    }
+  } catch {
+    // no badge on this platform
+  }
+}

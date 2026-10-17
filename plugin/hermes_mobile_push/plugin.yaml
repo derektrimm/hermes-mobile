@@ -1,0 +1,15 @@
+name: hermes_mobile_push
+version: 1.0.0
+description: "Tells the Hermes Mobile server on this host when a chat needs you, has replied, failed, or finished a background task, so it can notify your phone."
+author: Derek Trimm
+license: MIT
+platforms:
+  - linux
+hooks:
+  - pre_llm_call
+  - post_llm_call
+  - on_session_end
+  - on_human_input_request
+  - on_human_input_resolved
+  - subagent_start
+  - subagent_stop

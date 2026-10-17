@@ -205,14 +205,15 @@ export function setChat(update: Partial<Chat> | ((c: Chat) => Partial<Chat>)) {
   setState(s => ({ chat: { ...s.chat, ...(typeof update === 'function' ? update(s.chat) : update) } }))
 }
 
-function subscribe(listener: () => void) {
+/** Run `listener` after every state change; returns the function that stops it. */
+export function onStateChange(listener: () => void) {
   listeners.add(listener)
 
   return () => listeners.delete(listener)
 }
 
 export function useStore<T>(select: (s: State) => T): T {
-  return useSyncExternalStore(subscribe, () => select(state))
+  return useSyncExternalStore(onStateChange, () => select(state))
 }
 
 let toastSeq = 0

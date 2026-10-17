@@ -40,5 +40,27 @@ for i in $(seq 1 20); do
 done
 systemctl --user is-active hermes-mobile.service
 curl -fsS --unix-socket "$sock" http://local/healthz; echo
+# Notifications: the plugin that reports chat events to this app, in every Hermes profile. Enabling
+# it writes the profile's config, so every Hermes process started later loads it. The running
+# backend (the dashboard) is then asked to load it now, and again whenever its code changed; that
+# answer lists the hooks it loaded, which is the check that it took. Other backends already running
+# (the desktop app's, a PC window's) load a changed plugin when they next start.
+root=${HM_HERMES_ROOT:-$HOME/.hermes}
+backend=${HM_BACKEND:-http://127.0.0.1:9119}
+token=$(curl -fsS "$backend/" | grep -oP '__HERMES_SESSION_TOKEN__\s*=\s*"\K[^"]+' || true)
+for home in "$root" "$root"/profiles/*; do
+  [[ -f "$home/config.yaml" ]] || continue
+  changed=$(rsync -a --delete --exclude __pycache__ --itemize-changes plugin/hermes_mobile_push/ "$home/plugins/hermes_mobile_push/" | grep -E '^(>|\*deleting)' || true)
+  enabled=$(HERMES_HOME="$home" hermes plugins enable hermes_mobile_push </dev/null 2>&1) || { echo "$enabled" >&2; exit 1; }
+  state="unchanged"
+  if [[ -n "$changed" || "$enabled" != *"already enabled"* ]]; then
+    [[ -n "$token" ]] || { echo "deploy: no token from $backend to load the notifications plugin" >&2; exit 1; }
+    answer=$(curl -fsS -X POST "$backend/api/dashboard/agent-plugins/activate" -H "X-Hermes-Session-Token: $token" \
+      -H 'content-type: application/json' -d "{\"name\":\"hermes_mobile_push\",\"home\":\"$home\"}")
+    [[ "$answer" == *'"on_session_end"'* ]] || { echo "deploy: the backend did not load the notifications plugin for $home: $answer" >&2; exit 1; }
+    state="loaded in the running backend"
+  fi
+  echo "notifications plugin in ${home#"$HOME"/}: $state"
+done
 REMOTE
 echo "https://$host:$port/"

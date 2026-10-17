@@ -18,6 +18,8 @@ import { promisify } from 'node:util'
 
 import { WebSocket, WebSocketServer } from 'ws'
 
+import { cleanPrefs, clip, encrypt, loadVapid, notificationBody, Notifier, PushStore, pushEndpointAllowed, sendPush } from './push.mjs'
+
 const run = promisify(execFile)
 const here = path.dirname(fileURLToPath(import.meta.url))
 const HOME = process.env.HOME || os.homedir()
@@ -1158,6 +1160,280 @@ async function share(sessionId, profile) {
   return { status: 504, body: { ok: false, error: 'The window restarted but its chat did not come back within 40 s.' } }
 }
 
+// ---------------------------------------------------------------- notifications
+
+// Hermes processes on this host report what happens in their chats (plugin/hermes_mobile_push) over
+// a socket next to the app's, in the same 0700 directory: only this account can send events. The
+// Notifier decides what is worth a notification; each subscribed device gets it by Web Push.
+const PUSH_STATE = path.join(HOME, '.local/state/hermes-mobile')
+const pushStore = new PushStore(path.join(PUSH_STATE, 'push.json'))
+const vapid = await loadVapid(path.join(PUSH_STATE, 'vapid.json'))
+// Who runs this server, as push services ask (RFC 8292): the app's own address.
+const pushSubject = process.env.HM_PUSH_SUBJECT || config.origin
+
+// What each device has on screen, as it reports it: a chat on screen notifies nobody.
+const PRESENCE_FRESH_MS = 45_000
+const presence = new Map()
+
+function viewing(sessionId) {
+  const now = Date.now()
+
+  return [...presence.values()].some(p => p.visible && p.session === sessionId && now - p.at < PRESENCE_FRESH_MS)
+}
+
+// A chat open where its owner may be watching it on the PC: a classic window, the desktop app, or a
+// shared window that shows it (a PC chat driven from the phone with no window open does not count).
+async function heldOnPc(sessionId) {
+  const holders = [...(await liveSessions()), ...(await sharedLive())].filter(l => l.session_id === sessionId).map(l => l.holder)
+
+  if (holders.includes('pc-window') || holders.includes('desktop-app')) {
+    return true
+  }
+
+  return holders.includes('pc-shared') && Boolean(await windowShowing(sessionId))
+}
+
+const titles = new Map()
+
+async function chatTitle(sessionId, profile) {
+  const cached = titles.get(sessionId)
+
+  if (cached && Date.now() - cached.at < 60_000) {
+    return cached.title
+  }
+
+  let title = ''
+
+  try {
+    const response = await fetch(`${config.backend}/api/sessions/${encodeURIComponent(sessionId)}?profile=${encodeURIComponent(profile)}`, {
+      headers: { 'x-hermes-session-token': await backendToken(config.backend) },
+      signal: AbortSignal.timeout(5000)
+    })
+
+    if (response.ok) {
+      const row = await response.json()
+      title = String(row?.title || row?.preview || '').replace(/\s+/g, ' ').trim()
+    }
+  } catch {
+    // untitled: the notification still goes out
+  }
+
+  if (titles.size > 500) {
+    titles.clear()
+  }
+
+  titles.set(sessionId, { title, at: Date.now() })
+
+  return title
+}
+
+const URGENT = new Set(['needs', 'failures'])
+
+async function deliver(kind, detail, only = null) {
+  const subscriptions = only ? [only] : (await pushStore.all()).filter(s => s.prefs?.[kind] !== false)
+
+  if (!subscriptions.length) {
+    return []
+  }
+
+  const title = detail.title ?? (clip(await chatTitle(detail.session, detail.profile), 80) || 'Hermes')
+  const message = {
+    title,
+    body: detail.body ?? notificationBody(kind, detail),
+    // One notification per chat: a newer one replaces the last.
+    tag: detail.session ? `chat:${detail.profile}:${detail.session}` : `hermes:${kind}`,
+    chat: detail.session ? { id: detail.session, profile: detail.profile } : null,
+    kind,
+    at: Date.now()
+  }
+  const results = await Promise.all(
+    subscriptions.map(async subscription => {
+      try {
+        const status = await sendPush(subscription, message, {
+          vapid,
+          subject: pushSubject,
+          urgency: URGENT.has(kind) ? 'high' : 'normal',
+          topic: message.tag
+        })
+
+        if (status === 404 || status === 410) {
+          await pushStore.remove(subscription.endpoint)
+        }
+
+        return status
+      } catch (error) {
+        return error.name === 'TimeoutError' ? 'timeout' : `error ${error.message}`
+      }
+    })
+  )
+  log(`push ${kind} ${detail.session || '-'} -> ${results.join(', ')}`)
+
+  return results
+}
+
+const notifier = new Notifier({
+  notify: (kind, detail) => deliver(kind, detail),
+  viewing,
+  heldOnPc,
+  log
+})
+
+// A Hermes process names its home; the server knows each home's profile.
+async function profileForHome(home) {
+  if (typeof home !== 'string' || !home) {
+    return null
+  }
+
+  for (const entry of await profileHomes()) {
+    if (path.resolve(entry.home) === path.resolve(home)) {
+      return entry.profile
+    }
+  }
+
+  return null
+}
+
+const events = http.createServer(async (req, res) => {
+  if (req.method !== 'POST' || req.url !== '/event') {
+    res.writeHead(404).end()
+
+    return
+  }
+
+  try {
+    const event = JSON.parse((await readBody(req)).toString() || '{}')
+    res.writeHead(204).end()
+
+    if (event?.v === 1 && typeof event.event === 'string') {
+      event.profile = (await profileForHome(event.home)) ?? (typeof event.profile === 'string' ? event.profile : 'default')
+      notifier.handle(event)
+    }
+  } catch (error) {
+    if (!res.headersSent) {
+      res.writeHead(error.status || 400).end()
+    }
+  }
+})
+
+function subscriptionFrom(body) {
+  const sub = body?.subscription
+
+  if (
+    typeof sub?.endpoint !== 'string' ||
+    sub.endpoint.length > 1024 ||
+    !pushEndpointAllowed(sub.endpoint) ||
+    typeof sub.keys?.p256dh !== 'string' ||
+    typeof sub.keys?.auth !== 'string'
+  ) {
+    return null
+  }
+
+  try {
+    encrypt(sub.keys, '') // keys that cannot encrypt are refused now, not at the first notification
+  } catch {
+    return null
+  }
+
+  return { endpoint: sub.endpoint, keys: sub.keys }
+}
+
+async function handlePush(req, res, url, who) {
+  if (url.pathname === '/hm/push' && req.method === 'GET') {
+    json(res, 200, { public_key: vapid.publicKey })
+
+    return
+  }
+
+  if (req.method !== 'POST' || !String(req.headers['content-type'] || '').startsWith('application/json')) {
+    json(res, 415, { ok: false, error: 'JSON POST required' })
+
+    return
+  }
+
+  const body = JSON.parse((await readBody(req)).toString() || '{}')
+  const endpoint = typeof body.endpoint === 'string' ? body.endpoint : body.subscription?.endpoint
+
+  switch (url.pathname) {
+    case '/hm/push/state': {
+      const entry = typeof endpoint === 'string' ? await pushStore.get(endpoint) : null
+      json(res, 200, { subscribed: Boolean(entry), prefs: entry?.prefs ?? cleanPrefs({}) })
+
+      return
+    }
+
+    case '/hm/push/subscribe': {
+      const sub = subscriptionFrom(body)
+
+      if (!sub) {
+        json(res, 400, { ok: false, error: 'not a push subscription this server can use' })
+
+        return
+      }
+
+      const entry = await pushStore.put({ ...sub, device: who.peer, prefs: body.prefs })
+      log(`push subscription saved for ${who.peer}`)
+      json(res, 200, { ok: true, prefs: entry.prefs })
+
+      return
+    }
+
+    case '/hm/push/prefs': {
+      const entry = typeof endpoint === 'string' ? await pushStore.setPrefs(endpoint, body.prefs) : null
+      json(res, entry ? 200 : 404, entry ? { ok: true, prefs: entry.prefs } : { ok: false, error: 'not subscribed' })
+
+      return
+    }
+
+    case '/hm/push/unsubscribe': {
+      if (typeof endpoint === 'string') {
+        await pushStore.remove(endpoint)
+      }
+
+      json(res, 200, { ok: true })
+
+      return
+    }
+
+    case '/hm/push/test': {
+      const entry = typeof endpoint === 'string' ? await pushStore.get(endpoint) : null
+
+      if (!entry) {
+        json(res, 404, { ok: false, error: 'not subscribed' })
+
+        return
+      }
+
+      const [status] = await deliver('test', { title: 'Hermes', body: 'Notifications are on. This is how Hermes reaches you.' }, entry)
+      json(res, status === 201 ? 200 : 502, { ok: status === 201, status })
+
+      return
+    }
+
+    case '/hm/presence': {
+      // A send names the chat it went to, which need not be the one on screen ("sent to the chat
+      // you left"): it marks that chat's turns as the phone's and says nothing about the screen.
+      if (body.sent === true) {
+        if (typeof body.session_id === 'string') {
+          notifier.notePhoneSent(body.session_id)
+        }
+      } else {
+        presence.set(who.peer, {
+          session: typeof body.session_id === 'string' ? body.session_id : null,
+          visible: body.visible === true,
+          at: Date.now()
+        })
+      }
+
+      json(res, 200, { ok: true })
+
+      return
+    }
+
+    default:
+      json(res, 404, { ok: false, error: 'unknown' })
+  }
+}
+
 // ---------------------------------------------------------------- static app
 
 const TYPES = {
@@ -1268,6 +1544,12 @@ const server = http.createServer(async (req, res) => {
       return
     }
 
+    if (url.pathname === '/hm/push' || url.pathname.startsWith('/hm/push/') || url.pathname === '/hm/presence') {
+      await handlePush(req, res, url, who)
+
+      return
+    }
+
     if (url.pathname === '/hm/live' && req.method === 'GET') {
       const joinable = await joinableBackends()
       const leases = await liveSessions()
@@ -1313,6 +1595,9 @@ const server = http.createServer(async (req, res) => {
 
         return
       }
+
+      // A turn the phone starts notifies the phone, however quick it is (see Notifier.quietReason).
+      notifier.notePhoneSent(body.session_id)
 
       // One message at a time per window, in the order they arrive.
       const previous = typing.get(body.session_id) ?? Promise.resolve()
@@ -1557,6 +1842,14 @@ if (config.socket) {
     void chmod(config.socket, 0o600)
     log(`Hermes Mobile on unix:${config.socket} -> ${config.backend}; devices: ${config.devices.join(', ')}`)
   })
+
+  // Hermes's events (plugin/hermes_mobile_push looks for this name in this directory).
+  const eventsSocket = process.env.HM_EVENTS_SOCKET || path.join(path.dirname(config.socket), 'events.sock')
+  await rm(eventsSocket, { force: true })
+  events.listen(eventsSocket, () => {
+    void chmod(eventsSocket, 0o600)
+    log(`Hermes events on unix:${eventsSocket}`)
+  })
 } else {
   server.listen(config.port, config.host, () => {
     log(`Hermes Mobile on http://${config.host}:${config.port} -> ${config.backend}; devices: ${config.devices.join(', ')}`)
@@ -1569,6 +1862,7 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
       ws.close(1012, 'server restarting')
     }
 
+    events.close()
     server.close(() => process.exit(0))
     setTimeout(() => process.exit(0), 3000).unref()
   })
